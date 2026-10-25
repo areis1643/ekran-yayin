@@ -1,0 +1,69 @@
+# AirPlay ekran yansıtma — kavram kanıtı (devir notu, 26 Ekim 2026)
+
+Amaç: iPad 2'deki `Araç` uygulaması (iPad/main.m) iPhone'un yerleşik **Ekran Yansıtma**
+özelliğinin alıcısı olsun. Bu belge yeni oturumun tek başına başlayabilmesi için yazıldı.
+
+## Kavram kanıtının tek sorusu
+
+iPhone (Ar3is'in, A15, iOS 27) iPad'e yansıtırken **H.264 mü HEVC mi** gönderiyor, hangi
+çözünürlükte? iPad 2 (A5) yalnız H.264 çözebilir. HEVC gelirse **dur**, proje kapanır.
+Bu adımda görüntü çizilmez: yalnız bulunma + el sıkışma + ilk yapılandırma paketini (tip 0x01,
+SPS/PPS) günlüğe yazmak. SPS'ten profil/çözünürlük okunur.
+
+## Neden bu yol (Ar3is kararı, 26 Ekim)
+
+- Mevcut yol: iPhone'da ReplayKit eklentisi (Yayin/) → TCP 8889 → Araç. Çalışıyor (25–29 kare/sn)
+  ama iPhone uygulaması ücretsiz hesapla 7 günde bir yeniden imza istiyor, yayın elle başlatılıyor,
+  ses iki cihazdan çıkıyor (iPhone sesi kısılarak çözülüyor).
+- AirPlay **ses** (AirSpeaker) iPad'de çalışıyor: iPhone iPad'i hotspot ağında buluyor, kilitte
+  çalıyor, senkron sorunu yok. Görüntüyü de aynı yoldan almak hedef.
+- Kazanılmayacak: iPhone kilitlenince yansıtma da duruyor; arama sesi iPhone'da kalıyor.
+
+## Kaynak: UxPlay (github.com/FDH2/UxPlay)
+
+- Bakımda; 1.73.7 (4 Eylül 2026) iOS 27 TEARDOWN düzeltmesi içeriyor. RPiPlay 2022'den beri ölü.
+- Çekirdek `lib/`: pthread, OpenSSL (libcrypto: EVP, RAND, PEM, SHA), libplist, gömülü playfair
+  (FairPlay), llhttp. GStreamer yalnız oynatıcı katmanında, alınmayacak.
+- Geri çağırmalar `lib/raop.h` → `raop_callbacks_t` (`video_process`, `audio_process`,
+  `video_set_codec_and_size` …). Video verisi `lib/stream.h` `video_decode_struct`.
+- `lib/raop_rtp_mirror.c`: şifre çözülmüş yük AVCC; çekirdek uzunlukları `00 00 00 01` yapıp
+  Annex-B verir. SPS/PPS ayrı, şifresiz tip 0x01 paketinde. Callback dönünce tampon serbest
+  bırakılıyor: asenkron çözücüye verilecekse kopyala.
+- "type 0x01 packet with no payload" = H.264 dışı codec (UxPlay #535). Bir iOS 27 beta iPhone 15 Pro
+  HEVC gönderdi; iPadOS 27 beta 5 H.264 ile sorunsuz. Bizim iPhone bilinmiyor → kavram kanıtı bunu ölçer.
+- `/info` yanıtında `displays[].widthPixels/heightPixels/maxFPS` (UxPlay `-s 1280x720 -fps 30`)
+  gönderene istenen boyutu bildirir. iPad 2 için 1024x768 ya da 1280x720 iste. Seçenekte
+  H.265'i **ilan etme** (features bit 42 SupportsScreenMultiCodec kapalı).
+- Bulunma: iOS'un kendi `dns_sd` (DNSServiceRegister) API'si iPad'de var; Avahi gerekmez.
+  `_airplay._tcp` ve `_raop._tcp` ilanları.
+
+## Ortam
+
+- iPad derleme: theos `~/theos`, iOS 9.3 SDK, armv7, `iPad/Makefile` (Araç uygulaması + `aracbaslat`
+  aracı). `sdkstub/libSystem.tbd` olmadan bağlanmaz. Derleme:
+  `cd iPad && THEOS=~/theos make package FINALPACKAGE=1` ("building for iOS Simulator" uyarıları normal).
+- Çapraz derlenecek: OpenSSL (armv7, iOS 9 en düşük sürüm; `ios-cross` hedefi), libplist, llhttp.
+  playfair kaynak olarak gömülü.
+- Kurulum (iPad Slayer'a USB ile takılı): deb'i nilserver üstünden Slayer'a scp, sonra `araclar/sps.sh`
+  ile PowerShell: `pymobiledevice3 usbmux forward --serial bf79db1054b82247babaeefca859934295210c7b 2222 22`
+  (iki cihaz takılıyken `--serial` şart) + `ipssh.py put` + `ipssh.py "cd /; dpkg -i …"`.
+  Örnek: oturum geçmişinde ve `🧠 500-Knowledge/ipad-muzik/ipad-muzik.md`.
+- iPad'de `tail`, `cut`, `ifconfig` yok. Syslog USB'den açılmıyor: tanıyı dosyaya yaz
+  (ör. `/var/mobile/Library/Logs/arac-airplay.log`) ve SSH ile oku.
+- AirSpeaker iPad'de çalışıyor ve `_raop._tcp` ilan ediyor. Ad çakışmasına dikkat (ayrı ad kullan,
+  ör. "Araç Ekran"); gerekirse kavram kanıtı sırasında AirSpeaker durdurulur:
+  `launchctl unload /Library/LaunchDaemons/net.angelxwind.airspeaker.plist`.
+- Test ağı: iPad iPhone hotspot'unda (172.20.10.x). Ev modemi Wi-Fi'de multicast geçirmiyor, evde
+  bulunma testi yapılamaz; hotspot'ta Bonjour geçiyor (AirSpeaker ile doğrulandı).
+
+## Önerilen sıra
+
+1. UxPlay'i klonla, `lib/` bağımlılık listesini doğrula.
+2. OpenSSL + libplist + llhttp'yi armv7/iOS 9 için statik derle (işçi işi).
+3. `iPad/` altına ayrı bir deneme aracı (tool) ya da Araç içine: dns_sd ilanı + raop sunucusu,
+   `video_process` ilk çağrısında / tip 0x01 paketinde codec, SPS profil ve çözünürlüğü günlüğe yaz.
+4. iPad'e kur, Ar3is hotspot'ta Denetim Merkezi → Ekran Yansıtma → bu adı seçsin, günlüğü oku.
+5. H.264 → görüntüyü Araç'ın mevcut AVSampleBufferDisplayLayer yoluna bağla. HEVC → dur, kaydet.
+
+Kural: görsel tasarım değişikliği önce Telegram'dan (dev-notify --file) onaya gider. Kod yazımı
+DELEGE kurallarıyla işçilere (sol-amele / deepseek-amele) verilir, ana oturum denetler.
