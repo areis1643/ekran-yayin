@@ -615,6 +615,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     UILabel *_durumEtiketi;
     Alici *_alici;
     NSTimer *_durumZamanlayici;
+    int _karesizSaniye;
+    BOOL _goruntuGeldi; // açılıştaki bekleyişi kesintiden ayırmak için
 }
 
 - (void)viewDidLoad {
@@ -664,9 +666,22 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
 - (void)durumuGuncelle {
     int32_t kare = [_alici kareSayaciniSifirla];
-    if ([_alici bagliMi]) {
+    int32_t ses = [_alici sesSayaciniSifirla];
+    // Durağan ekranda ReplayKit kare yollamayabilir; kesinti sayılması için ses de susmalı.
+    if (kare > 0 || ses > 0) {
+        _karesizSaniye = 0;
+        _goruntuGeldi = YES;
+    } else {
+        _karesizSaniye++;
+    }
+
+    if (_goruntuGeldi && _karesizSaniye >= 5) {
+        // Arama gibi kesintide bağlantı kalsa da kare gelmeyebilir; kullanıcıya açıkça göster.
+        _durumEtiketi.text = [NSString stringWithFormat:@"görüntü yok (%d sn) • arama bitince kendiliğinden döner, dönmezse iPhone'da yayını yeniden başlat", _karesizSaniye];
+        _durumEtiketi.hidden = NO;
+    } else if ([_alici bagliMi]) {
         _durumEtiketi.text = [NSString stringWithFormat:@"bağlandı • %d kare/sn • ses %d paket/sn • %@",
-                              kare, [_alici sesSayaciniSifirla], [_alici sesDurumu]];
+                              kare, ses, [_alici sesDurumu]];
     } else {
         _durumEtiketi.text = kDurumBekliyor;
     }

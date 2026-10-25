@@ -46,6 +46,16 @@ class SampleHandler: RPBroadcastSampleHandler {
         httpServer = http
     }
 
+    // Arama gibi kesintilerde sistem çağırır; sunucular açık bırakılır.
+    override func broadcastPaused() {
+        NSLog("EkranYayin yayin duraklatildi")
+    }
+
+    override func broadcastResumed() {
+        NSLog("EkranYayin yayin surduruldu")
+        h264Encoder?.requestKeyframe()
+    }
+
     override func broadcastFinished() {
         h264Encoder?.stop()
         streamServer?.stop()
