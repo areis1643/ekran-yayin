@@ -486,8 +486,9 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
             _sesKuyrugu = NULL;
             return;
         }
-        tampon->mAudioDataByteSize = 0;
-        AudioQueueEnqueueBuffer(_sesKuyrugu, tampon, 0, NULL);
+        // Boş (0 bayt) tampon kuyruğa kabul edilmez, geri çağırma hiç başlamaz;
+        // ilk turu dolu (gerekirse sessiz) tamponla başlat.
+        SesGeriCagirma((__bridge void *)self, _sesKuyrugu, tampon);
     }
     durum = AudioQueueStart(_sesKuyrugu, NULL);
     if (durum != noErr) {
