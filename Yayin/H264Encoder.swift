@@ -91,7 +91,7 @@ final class H264Encoder {
             presentationTimeStamp: timestamp,
             duration: .invalid,
             frameProperties: properties,
-            sourceFrameRefCon: nil,
+            sourceFrameRefcon: nil,
             infoFlagsOut: nil
         )
         if encodeStatus != noErr {
@@ -124,7 +124,7 @@ final class H264Encoder {
             height: Int32(targetHeight),
             codecType: kCMVideoCodecType_H264,
             encoderSpecification: nil,
-            sourceImageBufferAttributes: attributes as CFDictionary,
+            imageBufferAttributes: attributes as CFDictionary,
             compressedDataAllocator: nil,
             outputCallback: h264OutputCallback,
             refcon: Unmanaged.passUnretained(self).toOpaque(),
@@ -259,7 +259,7 @@ final class H264Encoder {
 
 private func h264OutputCallback(
     _ refcon: UnsafeMutableRawPointer?,
-    _ sourceFrameRefCon: UnsafeMutableRawPointer?,
+    _ sourceFrameRefcon: UnsafeMutableRawPointer?,
     _ status: OSStatus,
     _ infoFlags: VTEncodeInfoFlags,
     _ sampleBuffer: CMSampleBuffer?
