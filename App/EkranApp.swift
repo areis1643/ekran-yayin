@@ -1,3 +1,4 @@
+import Network
 import ReplayKit
 import SwiftUI
 
@@ -31,5 +32,26 @@ struct AnaEkran: View {
                 .foregroundStyle(.secondary)
         }
         .padding()
+        .onAppear { YerelAgIzni.iste() }
+    }
+}
+
+/// iOS yerel ağ gizliliği: izin verilmeden eklentinin sunucusu hotspot arayüzünde
+/// "prohibited" kalıyor, iPad bağlanamıyor. İzin penceresi ancak uygulama yerel ağa
+/// paket yollayınca çıkıyor; bu yüzden hotspot alt ağına boş bir UDP paketi atılır.
+enum YerelAgIzni {
+    private static var baglantilar: [NWConnection] = []
+
+    static func iste() {
+        for host in ["172.20.10.2", "172.20.10.3", "192.168.1.1"] {
+            let c = NWConnection(host: NWEndpoint.Host(host), port: 9, using: .udp)
+            c.stateUpdateHandler = { state in
+                if case .ready = state {
+                    c.send(content: Data([0]), completion: .contentProcessed { _ in c.cancel() })
+                }
+            }
+            c.start(queue: .main)
+            baglantilar.append(c)
+        }
     }
 }
