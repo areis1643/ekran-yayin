@@ -1,3 +1,5 @@
 build/
 Ekran.xcodeproj/
 araclar/ipa3/
+iPad/.theos/
+iPad/packages/

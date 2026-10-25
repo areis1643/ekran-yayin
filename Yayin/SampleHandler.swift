@@ -1,47 +1,83 @@
+import AudioToolbox
+import AVFoundation
 import CoreImage
 import ImageIO
 import ReplayKit
 
-/// Yayın eklentisi: iPhone ekranını küçültüp JPEG'e çevirir, son kareyi HTTP'den verir.
-/// iPad 2 (iOS 9) WebRTC ve fMP4 HLS bilmediği için düz JPEG seçildi.
+/// Yayın eklentisi: iPhone ekranını H.264 + PCM olarak TCP'den, JPEG'i HTTP'den verir.
 class SampleHandler: RPBroadcastSampleHandler {
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     private let encodeQueue = DispatchQueue(label: "ekran.encode")
     private let lock = NSLock()
     private var busy = false
-    private var lastTime: CFAbsoluteTime = 0
-    private var server: HTTPServer?
+    private var lastJpegTime: CFAbsoluteTime = 0
+    private var httpServer: HTTPServer?
+    private var streamServer: StreamServer?
+    private var h264Encoder: H264Encoder?
 
-    // Eklentinin bellek sınırı ~50 MB; kare boyutu ve hızı bunun içinde kalacak şekilde.
+    // Eklentinin bellek sınırı ~50 MB; JPEG yalnız istek varken ve sınırlı hızda üretilir.
     private let minInterval = 1.0 / 20.0
     private let maxSide: CGFloat = 800
     private let quality: CGFloat = 0.5
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         NSLog("EkranYayin yayin basladi")
-        let s = HTTPServer(port: 8888)
-        s.start()
-        server = s
+        let stream = StreamServer(port: 8889)
+        let encoder = H264Encoder { [weak stream] type, payload in
+            stream?.send(type: type, payload: payload)
+        }
+        stream.onNewClient = { [weak encoder] in
+            encoder?.requestKeyframe()
+            NSLog("EkranYayin yeni istemci; anahtar kare istendi")
+        }
+        stream.start()
+
+        let http = HTTPServer(port: 8888)
+        http.start()
+
+        streamServer = stream
+        h264Encoder = encoder
+        httpServer = http
     }
 
     override func broadcastFinished() {
-        server?.stop()
-        server = nil
+        h264Encoder?.stop()
+        streamServer?.stop()
+        httpServer?.stop()
+        h264Encoder = nil
+        streamServer = nil
+        httpServer = nil
+        NSLog("EkranYayin yayin bitti")
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
-        guard sampleBufferType == .video,
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        switch sampleBufferType {
+        case .video:
+            processVideo(sampleBuffer)
+        case .audioApp:
+            processAudio(sampleBuffer)
+        default:
+            break // .audioMic yok sayılır
+        }
+    }
+
+    private func processVideo(_ sampleBuffer: CMSampleBuffer) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        h264Encoder?.encode(pixelBuffer, presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+
+        // JPEG yolu yalnız son 3 sn içinde HTTP isteği geldiyse çalışır.
+        guard FrameStore.shared.isRequestedRecently else { return }
 
         let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
-        if busy || now - lastTime < minInterval {
+        if busy || now - lastJpegTime < minInterval {
             lock.unlock()
             return
         }
         busy = true
-        lastTime = now
+        lastJpegTime = now
         lock.unlock()
 
         var orientation = CGImagePropertyOrientation.up
@@ -75,6 +111,140 @@ class SampleHandler: RPBroadcastSampleHandler {
             self.lock.unlock()
         }
     }
+
+    private func processAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbdPointer = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else { return }
+        let asbd = asbdPointer.pointee
+        guard asbd.mFormatID == kAudioFormatLinearPCM else { return }
+
+        let sourceChannels = Int(asbd.mChannelsPerFrame)
+        let channels = min(sourceChannels, 2)
+        let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard channels > 0, frames > 0 else { return }
+
+        let audioBufferList = AudioBufferList.allocate(maximumBuffers: 2)
+        defer { free(audioBufferList.unsafeMutablePointer) }
+        for index in 0..<audioBufferList.count {
+            audioBufferList[index] = AudioBuffer(mNumberChannels: 0, mDataByteSize: 0, mData: nil)
+        }
+        var blockBuffer: CMBlockBuffer?
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: audioBufferList.unsafeMutablePointer,
+            bufferListSize: AudioBufferList.sizeInBytes(maximumBuffers: 2),
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr else {
+            NSLog("EkranYayin ses buffer listesi alinamadi: %d", status)
+            return
+        }
+
+        let formatFlags = asbd.mFormatFlags
+        let isFloat = (formatFlags & kAudioFormatFlagIsFloat) != 0
+        let isBigEndian = (formatFlags & kAudioFormatFlagIsBigEndian) != 0
+        let isNonInterleaved = (formatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        let isSigned = (formatFlags & kAudioFormatFlagIsSignedInteger) != 0
+        let bits = Int(asbd.mBitsPerChannel)
+        if isFloat {
+            guard bits == 32 else { return }
+        } else {
+            guard bits == 8 || bits == 16 || bits == 24 || bits == 32 else { return }
+        }
+        let sampleBytes = max(1, (bits + 7) / 8)
+        let frameStride = Int(asbd.mBytesPerFrame) > 0 ? Int(asbd.mBytesPerFrame) : sampleBytes * sourceChannels
+        let channelStride = max(sampleBytes, frameStride / max(1, sourceChannels))
+
+        var samples = [Int16]()
+        samples.reserveCapacity(frames * channels)
+
+        for frame in 0..<frames {
+            for channel in 0..<channels {
+                let bufferIndex = isNonInterleaved ? channel : 0
+                guard bufferIndex < audioBufferList.count else { continue }
+                let buffer = audioBufferList[bufferIndex]
+                guard let base = buffer.mData else { continue }
+
+                let offset: Int
+                if isNonInterleaved {
+                    let bufferStride = max(sampleBytes, Int(buffer.mDataByteSize) / max(1, frames))
+                    offset = frame * bufferStride
+                } else {
+                    offset = frame * frameStride + channel * channelStride
+                }
+                guard offset + sampleBytes <= Int(buffer.mDataByteSize) else { continue }
+                samples.append(readSample(base, offset: offset, bits: bits, isFloat: isFloat, isSigned: isSigned, bigEndian: isBigEndian))
+            }
+        }
+        _ = blockBuffer
+
+        guard !samples.isEmpty else { return }
+        let sampleRate = UInt32(max(0, min(Double(UInt32.max), asbd.mSampleRate.rounded())))
+        let pcm = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+
+        var payload = Data(capacity: pcm.count + 5)
+        payload.append(UInt8((sampleRate >> 24) & 0xFF))
+        payload.append(UInt8((sampleRate >> 16) & 0xFF))
+        payload.append(UInt8((sampleRate >> 8) & 0xFF))
+        payload.append(UInt8(sampleRate & 0xFF))
+        payload.append(UInt8(channels))
+        payload.append(pcm)
+        streamServer?.send(type: 0x41, payload: payload)
+    }
+
+    /// ASBD'deki float/int örneği Int16 little-endian'a çevirir.
+    private func readSample(
+        _ base: UnsafeMutableRawPointer,
+        offset: Int,
+        bits: Int,
+        isFloat: Bool,
+        isSigned: Bool,
+        bigEndian: Bool
+    ) -> Int16 {
+        let bytes = max(1, (bits + 7) / 8)
+        let pointer = (base + offset).assumingMemoryBound(to: UInt8.self)
+        var raw: UInt32 = 0
+        for index in 0..<min(bytes, 4) {
+            if bigEndian {
+                raw = (raw << 8) | UInt32(pointer[index])
+            } else {
+                raw |= UInt32(pointer[index]) << (8 * index)
+            }
+        }
+
+        if isFloat {
+            guard bits == 32 else { return 0 }
+            return pcm16(Double(Float(bitPattern: raw)))
+        }
+        guard bits >= 8, bits <= 32 else { return 0 }
+
+        let mask: UInt32 = bits == 32 ? UInt32.max : (UInt32(1) << UInt32(bits)) - 1
+        let value = raw & mask
+        let half = Int64(1) << (bits - 1)
+        let signedValue: Int64
+        if isSigned && (value & (UInt32(1) << UInt32(bits - 1))) != 0 {
+            signedValue = Int64(value) - (Int64(1) << bits)
+        } else {
+            signedValue = Int64(value)
+        }
+
+        let normalized: Double
+        if isSigned {
+            normalized = Double(signedValue) / Double(half)
+        } else {
+            normalized = (Double(signedValue) - Double(half)) / Double(half)
+        }
+        return pcm16(normalized)
+    }
+
+    private func pcm16(_ value: Double) -> Int16 {
+        let clamped = max(-1.0, min(1.0, value))
+        return Int16((clamped * 32767.0).rounded())
+    }
 }
 
 /// Son kodlanan kare; HTTP tarafı buradan okur.
@@ -83,6 +253,7 @@ final class FrameStore {
     private let lock = NSLock()
     private var jpeg: Data?
     private var seq = 0
+    private var lastRequest: CFAbsoluteTime = 0
 
     func put(_ data: Data) {
         lock.lock()
@@ -95,5 +266,17 @@ final class FrameStore {
         lock.lock()
         defer { lock.unlock() }
         return (jpeg, seq)
+    }
+
+    func touch() {
+        lock.lock()
+        lastRequest = CFAbsoluteTimeGetCurrent()
+        lock.unlock()
+    }
+
+    var isRequestedRecently: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return CFAbsoluteTimeGetCurrent() - lastRequest < 3.0
     }
 }

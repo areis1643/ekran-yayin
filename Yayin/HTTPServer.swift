@@ -76,6 +76,7 @@ final class HTTPServer {
     /// Aynı kareyi iki kez yollama: yeni kare gelene kadar (en çok ~400 ms) bekle.
     /// Böylece iPad her kareyi bir kez ve düzenli aralıkla alır, boşuna çözmez.
     private func sendFrame(_ c: NWConnection, after lastSeq: Int, waited: Int) {
+        FrameStore.shared.touch()
         let (jpeg, seq) = FrameStore.shared.get()
         if let jpeg, seq != lastSeq || waited >= 40 {
             send(c, type: "image/jpeg", body: jpeg, seq: seq)
@@ -98,6 +99,7 @@ final class HTTPServer {
     }
 
     private func pushNext(_ c: NWConnection, lastSeq: Int) {
+        FrameStore.shared.touch()
         let (jpeg, seq) = FrameStore.shared.get()
         guard let jpeg, seq != lastSeq else {
             queue.asyncAfter(deadline: .now() + 0.02) { [weak self] in self?.pushNext(c, lastSeq: lastSeq) }

@@ -1,0 +1,9 @@
+Package: tr.niladsp.arac
+Name: Arac
+Version: 0.1
+Architecture: iphoneos-arm
+Description: iPhone ekrani alicisi
+Maintainer: Ar3is
+Author: Ar3is
+Section: Utilities
+Depends: firmware (>= 9.0)
