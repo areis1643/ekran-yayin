@@ -3,6 +3,9 @@ import AVFoundation
 import CoreImage
 import ImageIO
 import ReplayKit
+import os
+
+private let alog = Logger(subsystem: "tr.niladsp.ekran", category: "ses")
 
 /// Yayın eklentisi: iPhone ekranını H.264 + PCM olarak TCP'den, JPEG'i HTTP'den verir.
 class SampleHandler: RPBroadcastSampleHandler {
@@ -11,6 +14,8 @@ class SampleHandler: RPBroadcastSampleHandler {
     private let encodeQueue = DispatchQueue(label: "ekran.encode")
     private let lock = NSLock()
     private var busy = false
+    private var audioErrorCount = 0
+    private var audioSent = 0
     private var lastJpegTime: CFAbsoluteTime = 0
     private var httpServer: HTTPServer?
     private var streamServer: StreamServer?
@@ -123,26 +128,38 @@ class SampleHandler: RPBroadcastSampleHandler {
         let frames = CMSampleBufferGetNumSamples(sampleBuffer)
         guard channels > 0, frames > 0 else { return }
 
-        let audioBufferList = AudioBufferList.allocate(maximumBuffers: 2)
-        defer { free(audioBufferList.unsafeMutablePointer) }
-        for index in 0..<audioBufferList.count {
-            audioBufferList[index] = AudioBuffer(mNumberChannels: 0, mDataByteSize: 0, mData: nil)
+        // Gereken liste boyutu önce sorulur; sabit boyut verilince çağrı her pakette
+        // hata döndürüyordu (sahada görüldü).
+        var neededSize = 0
+        CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer, bufferListSizeNeededOut: &neededSize, bufferListOut: nil, bufferListSize: 0,
+            blockBufferAllocator: nil, blockBufferMemoryAllocator: nil, flags: 0, blockBufferOut: nil)
+        guard neededSize > 0 else {
+            alog.error("ses liste boyutu alinamadi")
+            return
         }
+        let rawList = UnsafeMutableRawPointer.allocate(byteCount: neededSize, alignment: 16)
+        defer { rawList.deallocate() }
+        let listPointer = rawList.bindMemory(to: AudioBufferList.self, capacity: 1)
         var blockBuffer: CMBlockBuffer?
         let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
             sampleBuffer,
             bufferListSizeNeededOut: nil,
-            bufferListOut: audioBufferList.unsafeMutablePointer,
-            bufferListSize: AudioBufferList.sizeInBytes(maximumBuffers: 2),
-            blockBufferAllocator: kCFAllocatorDefault,
-            blockBufferMemoryAllocator: kCFAllocatorDefault,
-            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            bufferListOut: listPointer,
+            bufferListSize: neededSize,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: 0,
             blockBufferOut: &blockBuffer
         )
         guard status == noErr else {
-            NSLog("EkranYayin ses buffer listesi alinamadi: %d", status)
+            if audioErrorCount % 200 == 0 {
+                alog.error("ses buffer listesi alinamadi: \(Int(status), privacy: .public) boyut \(neededSize, privacy: .public)")
+            }
+            audioErrorCount += 1
             return
         }
+        let audioBufferList = UnsafeMutableAudioBufferListPointer(listPointer)
 
         let formatFlags = asbd.mFormatFlags
         let isFloat = (formatFlags & kAudioFormatFlagIsFloat) != 0
@@ -193,6 +210,10 @@ class SampleHandler: RPBroadcastSampleHandler {
         payload.append(UInt8(sampleRate & 0xFF))
         payload.append(UInt8(channels))
         payload.append(pcm)
+        audioSent += 1
+        if audioSent % 500 == 1 {
+            alog.notice("ses paketi \(self.audioSent, privacy: .public): \(sampleRate, privacy: .public) Hz \(channels, privacy: .public) kanal, bayrak \(formatFlags, privacy: .public), \(bits, privacy: .public) bit, \(frames, privacy: .public) kare")
+        }
         streamServer?.send(type: 0x41, payload: payload)
     }
 

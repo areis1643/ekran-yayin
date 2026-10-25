@@ -148,6 +148,8 @@ typedef struct {
 - (void)setBekliyor:(BOOL)bekliyor;
 - (BOOL)bekliyorMu;
 - (int32_t)kareSayaciniSifirla;
+- (int32_t)sesSayaciniSifirla;
+- (NSString *)sesDurumu;
 - (void)sesTamponuDoldur:(AudioQueueBufferRef)tampon;
 @end
 
@@ -175,6 +177,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     pthread_mutex_t _halkaKilit;
 
     volatile int32_t _kareSayaci;
+    volatile int32_t _sesSayaci; // tanı: saniyedeki ses paketi
 }
 
 - (instancetype)initWithKatman:(AVSampleBufferDisplayLayer *)katman {
@@ -238,6 +241,14 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
 - (int32_t)kareSayaciniSifirla {
     return __sync_lock_test_and_set(&_kareSayaci, 0);
+}
+
+- (int32_t)sesSayaciniSifirla {
+    return __sync_lock_test_and_set(&_sesSayaci, 0);
+}
+
+- (NSString *)sesDurumu {
+    return [NSString stringWithFormat:@"%.0f Hz/%d kanal, kuyruk %@", _sesHizi, _sesKanali, _sesKuyrugu ? @"var" : @"yok"];
 }
 
 // Anahtar kare ise beklemeyi bitir; beklerken gelen anahtar olmayan kareyi at.
@@ -430,6 +441,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 #pragma mark Ses
 
 - (void)sesPaketi:(const uint8_t *)p uzunluk:(size_t)n {
+    __sync_add_and_fetch(&_sesSayaci, 1);
     if (!p || n < 6) return;
     uint32_t hiz = oku32be(p);
     int kanal = p[4];
@@ -653,7 +665,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 - (void)durumuGuncelle {
     int32_t kare = [_alici kareSayaciniSifirla];
     if ([_alici bagliMi]) {
-        _durumEtiketi.text = [NSString stringWithFormat:@"bağlandı • %d kare/sn", kare];
+        _durumEtiketi.text = [NSString stringWithFormat:@"bağlandı • %d kare/sn • ses %d paket/sn • %@",
+                              kare, [_alici sesSayaciniSifirla], [_alici sesDurumu]];
     } else {
         _durumEtiketi.text = kDurumBekliyor;
     }
