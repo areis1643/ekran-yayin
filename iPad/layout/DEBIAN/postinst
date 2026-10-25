@@ -1,0 +1,7 @@
+#!/bin/sh
+# launchd grup yazılabilir plist'i reddediyor.
+chown root:wheel /Library/LaunchDaemons/tr.niladsp.aracbaslat.plist
+chmod 644 /Library/LaunchDaemons/tr.niladsp.aracbaslat.plist
+launchctl unload /Library/LaunchDaemons/tr.niladsp.aracbaslat.plist 2>/dev/null
+launchctl load /Library/LaunchDaemons/tr.niladsp.aracbaslat.plist
+exit 0
