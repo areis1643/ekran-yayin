@@ -57,10 +57,25 @@ final class HTTPServer {
     private func send(_ c: NWConnection, type: String, body: Data, status: String = "200 OK") {
         let head = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\n"
             + "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
-        c.send(content: Data(head.utf8) + body, completion: .contentProcessed { err in
+        // Yanıtı yollar yollamaz cancel() etmek, istemci veriyi almadan bağlantıyı kesip
+        // sayfayı yarım bırakabiliyordu (iPad'de betik hiç çalışmıyordu). Yazma yönünü
+        // kapatıp istemcinin kapatmasını bekle; gelmezse birkaç saniye sonra kes.
+        c.send(content: Data(head.utf8) + body, contentContext: .finalMessage, isComplete: true,
+               completion: .contentProcessed { err in
             log.notice("yanit \(status, privacy: .public) \(body.count) bayt hata=\(String(describing: err), privacy: .public)")
-            c.cancel()
+            self.drainUntilClosed(c)
         })
+    }
+
+    private func drainUntilClosed(_ c: NWConnection) {
+        c.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] _, _, isComplete, err in
+            if isComplete || err != nil {
+                c.cancel()
+            } else {
+                self?.drainUntilClosed(c)
+            }
+        }
+        queue.asyncAfter(deadline: .now() + 5) { c.cancel() }
     }
 
     private func sendFrame(_ c: NWConnection) {
