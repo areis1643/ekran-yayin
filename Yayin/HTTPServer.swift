@@ -37,11 +37,11 @@ final class HTTPServer {
         log.notice("baglanti: \(String(describing: c.endpoint), privacy: .public)")
         // Her bağlantı kendi seri kuyruğunda; uzun MJPEG akışı ötekileri bekletmesin.
         c.start(queue: DispatchQueue(label: "ekran.conn"))
-        readRequest(c)
+        readRequest(c, lastSeq: -1)
     }
 
     /// Bağlantı açık tutulur (keep-alive): iPad 2 her kare için yeni TCP açınca takılıyordu.
-    private func readRequest(_ c: NWConnection) {
+    private func readRequest(_ c: NWConnection, lastSeq: Int) {
         c.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, err in
             guard let self, err == nil, let data, !data.isEmpty,
                   let req = String(data: data, encoding: .utf8) else {
@@ -50,7 +50,7 @@ final class HTTPServer {
             }
             let path = req.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
             if path.hasPrefix("/frame.jpg") {
-                self.sendFrame(c)
+                self.sendFrame(c, after: lastSeq, waited: 0)
             } else if path.hasPrefix("/stream") {
                 self.startStream(c)
             } else if path.hasPrefix("/m") {
@@ -61,7 +61,7 @@ final class HTTPServer {
         }
     }
 
-    private func send(_ c: NWConnection, type: String, body: Data, status: String = "200 OK") {
+    private func send(_ c: NWConnection, type: String, body: Data, status: String = "200 OK", seq: Int = -1) {
         let head = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\n"
             + "Cache-Control: no-store\r\nConnection: keep-alive\r\nKeep-Alive: timeout=15\r\n\r\n"
         c.send(content: Data(head.utf8) + body, completion: .contentProcessed { [weak self] err in
@@ -69,16 +69,22 @@ final class HTTPServer {
                 c.cancel()
                 return
             }
-            self?.readRequest(c)
+            self?.readRequest(c, lastSeq: seq)
         })
     }
 
-    private func sendFrame(_ c: NWConnection) {
-        let (jpeg, _) = FrameStore.shared.get()
-        if let jpeg {
-            send(c, type: "image/jpeg", body: jpeg)
-        } else {
+    /// Aynı kareyi iki kez yollama: yeni kare gelene kadar (en çok ~400 ms) bekle.
+    /// Böylece iPad her kareyi bir kez ve düzenli aralıkla alır, boşuna çözmez.
+    private func sendFrame(_ c: NWConnection, after lastSeq: Int, waited: Int) {
+        let (jpeg, seq) = FrameStore.shared.get()
+        if let jpeg, seq != lastSeq || waited >= 40 {
+            send(c, type: "image/jpeg", body: jpeg, seq: seq)
+        } else if jpeg == nil && waited >= 40 {
             send(c, type: "text/plain", body: Data("bekleniyor".utf8), status: "503 Service Unavailable")
+        } else {
+            queue.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+                self?.sendFrame(c, after: lastSeq, waited: waited + 1)
+            }
         }
     }
 
