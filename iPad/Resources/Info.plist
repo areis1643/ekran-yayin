@@ -8,6 +8,16 @@
 	<string>Araç</string>
 	<key>CFBundleExecutable</key>
 	<string>Arac</string>
+	<key>CFBundleIcons~ipad</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>Icon-76</string>
+			</array>
+		</dict>
+	</dict>
 	<key>CFBundleIdentifier</key>
 	<string>tr.niladsp.arac</string>
 	<key>CFBundleInfoDictionaryVersion</key>
