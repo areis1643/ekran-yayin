@@ -14,9 +14,9 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var server: HTTPServer?
 
     // Eklentinin bellek sınırı ~50 MB; kare boyutu ve hızı bunun içinde kalacak şekilde.
-    private let minInterval = 1.0 / 12.0
+    private let minInterval = 1.0 / 15.0
     private let maxSide: CGFloat = 1024
-    private let quality: CGFloat = 0.6
+    private let quality: CGFloat = 0.5
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         NSLog("EkranYayin yayin basladi")

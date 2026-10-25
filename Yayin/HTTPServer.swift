@@ -37,17 +37,24 @@ final class HTTPServer {
         log.notice("baglanti: \(String(describing: c.endpoint), privacy: .public)")
         // Her bağlantı kendi seri kuyruğunda; uzun MJPEG akışı ötekileri bekletmesin.
         c.start(queue: DispatchQueue(label: "ekran.conn"))
-        c.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, _ in
-            guard let self, let data, let req = String(data: data, encoding: .utf8) else {
+        readRequest(c)
+    }
+
+    /// Bağlantı açık tutulur (keep-alive): iPad 2 her kare için yeni TCP açınca takılıyordu.
+    private func readRequest(_ c: NWConnection) {
+        c.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, err in
+            guard let self, err == nil, let data, !data.isEmpty,
+                  let req = String(data: data, encoding: .utf8) else {
                 c.cancel()
                 return
             }
             let path = req.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
-            log.notice("istek: \(path, privacy: .public)")
             if path.hasPrefix("/frame.jpg") {
                 self.sendFrame(c)
             } else if path.hasPrefix("/stream") {
                 self.startStream(c)
+            } else if path.hasPrefix("/m") {
+                self.send(c, type: "text/html; charset=utf-8", body: Data(Page.mjpeg.utf8))
             } else {
                 self.send(c, type: "text/html; charset=utf-8", body: Data(Page.html.utf8))
             }
@@ -56,26 +63,14 @@ final class HTTPServer {
 
     private func send(_ c: NWConnection, type: String, body: Data, status: String = "200 OK") {
         let head = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\n"
-            + "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
-        // Yanıtı yollar yollamaz cancel() etmek, istemci veriyi almadan bağlantıyı kesip
-        // sayfayı yarım bırakabiliyordu (iPad'de betik hiç çalışmıyordu). Yazma yönünü
-        // kapatıp istemcinin kapatmasını bekle; gelmezse birkaç saniye sonra kes.
-        c.send(content: Data(head.utf8) + body, contentContext: .finalMessage, isComplete: true,
-               completion: .contentProcessed { err in
-            log.notice("yanit \(status, privacy: .public) \(body.count) bayt hata=\(String(describing: err), privacy: .public)")
-            self.drainUntilClosed(c)
-        })
-    }
-
-    private func drainUntilClosed(_ c: NWConnection) {
-        c.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] _, _, isComplete, err in
-            if isComplete || err != nil {
+            + "Cache-Control: no-store\r\nConnection: keep-alive\r\nKeep-Alive: timeout=15\r\n\r\n"
+        c.send(content: Data(head.utf8) + body, completion: .contentProcessed { [weak self] err in
+            if err != nil {
                 c.cancel()
-            } else {
-                self?.drainUntilClosed(c)
+                return
             }
-        }
-        queue.asyncAfter(deadline: .now() + 5) { c.cancel() }
+            self?.readRequest(c)
+        })
     }
 
     private func sendFrame(_ c: NWConnection) {
@@ -111,6 +106,27 @@ final class HTTPServer {
 }
 
 enum Page {
+    // MJPEG denemesi: tek bağlantıdan akış, istek yükü yok. iOS 9 Safari img içinde
+    // multipart/x-mixed-replace gösteriyorsa en akıcı yol bu.
+    static let mjpeg = """
+    <!DOCTYPE html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>Ekran</title>
+    <style>html,body{margin:0;height:100%;background:#000;overflow:hidden}
+    #i{position:absolute;display:block}
+    #d{position:fixed;top:4px;left:6px;color:#555;font:12px sans-serif}</style></head>
+    <body><img id="i" alt=""><div id="d">akış</div><script>
+    var i=document.getElementById('i'),d=document.getElementById('d');
+    function fit(){var W=window.innerWidth,H=window.innerHeight,w=i.naturalWidth,h=i.naturalHeight;
+      if(!w||!h)return;var s=Math.min(W/w,H/h);i.style.width=(w*s)+'px';i.style.height=(h*s)+'px';
+      i.style.left=((W-w*s)/2)+'px';i.style.top=((H-h*s)/2)+'px';}
+    function ac(){i.src='/stream?'+new Date().getTime();}
+    i.onload=fit;i.onerror=function(){d.innerHTML='akış koptu';setTimeout(ac,1000);};
+    setInterval(fit,1000);window.onresize=fit;ac();
+    </script></body></html>
+    """
+
     // iOS 9 Safari: object-fit yok, ok fonksiyonu yok, let yok. Boyutlandırma JS'te.
     static let html = """
     <!DOCTYPE html><html><head><meta charset="utf-8">
