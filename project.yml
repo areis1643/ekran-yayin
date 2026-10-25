@@ -1,0 +1,47 @@
+name: Ekran
+options:
+  bundleIdPrefix: tr.niladsp
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGN_IDENTITY: ""
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Ekran:
+    type: application
+    platform: iOS
+    sources: [App]
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Ekran
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSLocalNetworkUsageDescription: iPad'in yayını izleyebilmesi için yerel ağ gerekiyor.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tr.niladsp.ekran
+        TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      - target: EkranYayin
+  EkranYayin:
+    type: app-extension
+    platform: iOS
+    sources: [Yayin]
+    info:
+      path: Yayin/Info.plist
+      properties:
+        CFBundleDisplayName: Ekran Yayını
+        NSLocalNetworkUsageDescription: iPad'in yayını izleyebilmesi için yerel ağ gerekiyor.
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tr.niladsp.ekran.EkranYayin
