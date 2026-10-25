@@ -19,6 +19,7 @@ class SampleHandler: RPBroadcastSampleHandler {
     private let quality: CGFloat = 0.6
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
+        NSLog("EkranYayin yayin basladi")
         let s = HTTPServer(port: 8888)
         s.start()
         server = s
@@ -62,6 +63,11 @@ class SampleHandler: RPBroadcastSampleHandler {
                 let options: [CIImageRepresentationOption: Any] = [qualityKey: self.quality]
                 if let jpeg = self.ciContext.jpegRepresentation(of: image, colorSpace: self.colorSpace, options: options) {
                     FrameStore.shared.put(jpeg)
+                    if FrameStore.shared.get().1 % 60 == 1 {
+                        NSLog("EkranYayin kare %d bayt %d", FrameStore.shared.get().1, jpeg.count)
+                    }
+                } else {
+                    NSLog("EkranYayin JPEG uretilemedi")
                 }
             }
             self.lock.lock()

@@ -1,5 +1,8 @@
 import Foundation
 import Network
+import os
+
+private let log = Logger(subsystem: "tr.niladsp.ekran", category: "http")
 
 /// En küçük HTTP sunucusu. Yollar:
 ///   /           iOS 9 Safari için ES5 izleme sayfası (kareleri art arda çeker)
@@ -8,7 +11,7 @@ import Network
 final class HTTPServer {
     private let port: UInt16
     private var listener: NWListener?
-    private let queue = DispatchQueue(label: "ekran.http", attributes: .concurrent)
+    private let queue = DispatchQueue(label: "ekran.http")
 
     init(port: UInt16) {
         self.port = port
@@ -20,6 +23,7 @@ final class HTTPServer {
         guard let nwPort = NWEndpoint.Port(rawValue: port),
               let l = try? NWListener(using: params, on: nwPort) else { return }
         l.newConnectionHandler = { [weak self] c in self?.handle(c) }
+        l.stateUpdateHandler = { state in log.notice("dinleyici durumu: \(String(describing: state), privacy: .public)") }
         l.start(queue: queue)
         listener = l
     }
@@ -30,13 +34,16 @@ final class HTTPServer {
     }
 
     private func handle(_ c: NWConnection) {
-        c.start(queue: queue)
+        log.notice("baglanti: \(String(describing: c.endpoint), privacy: .public)")
+        // Her bağlantı kendi seri kuyruğunda; uzun MJPEG akışı ötekileri bekletmesin.
+        c.start(queue: DispatchQueue(label: "ekran.conn"))
         c.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, _ in
             guard let self, let data, let req = String(data: data, encoding: .utf8) else {
                 c.cancel()
                 return
             }
             let path = req.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
+            log.notice("istek: \(path, privacy: .public)")
             if path.hasPrefix("/frame.jpg") {
                 self.sendFrame(c)
             } else if path.hasPrefix("/stream") {
@@ -50,7 +57,10 @@ final class HTTPServer {
     private func send(_ c: NWConnection, type: String, body: Data, status: String = "200 OK") {
         let head = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\n"
             + "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
-        c.send(content: Data(head.utf8) + body, completion: .contentProcessed { _ in c.cancel() })
+        c.send(content: Data(head.utf8) + body, completion: .contentProcessed { err in
+            log.notice("yanit \(status, privacy: .public) \(body.count) bayt hata=\(String(describing: err), privacy: .public)")
+            c.cancel()
+        })
     }
 
     private func sendFrame(_ c: NWConnection) {
@@ -101,11 +111,13 @@ enum Page {
     function fit(){var W=window.innerWidth,H=window.innerHeight,w=i.naturalWidth,h=i.naturalHeight;
       if(!w||!h)return;var s=Math.min(W/w,H/h);i.style.width=(w*s)+'px';i.style.height=(h*s)+'px';
       i.style.left=((W-w*s)/2)+'px';i.style.top=((H-h*s)/2)+'px';}
-    function next(){i.src='/frame.jpg?'+new Date().getTime();}
-    i.onload=function(){fit();n++;var t=new Date().getTime(),s=(t-t0)/1000;
+    var w=null;
+    function next(){clearTimeout(w);w=setTimeout(function(){d.innerHTML='zaman aşımı, yeniden';next();},3000);
+      i.src='/frame.jpg?'+new Date().getTime();}
+    i.onload=function(){clearTimeout(w);fit();n++;var t=new Date().getTime(),s=(t-t0)/1000;
       if(s>=2){d.innerHTML=(n/s).toFixed(1)+' kare/sn';n=0;t0=t;}next();};
-    i.onerror=function(){d.innerHTML='yayın bekleniyor';setTimeout(next,500);};
-    window.onresize=fit;next();
+    i.onerror=function(){clearTimeout(w);d.innerHTML='yayın bekleniyor';setTimeout(next,500);};
+    window.onresize=fit;d.innerHTML='istek gönderildi';next();
     </script></body></html>
     """
 }
