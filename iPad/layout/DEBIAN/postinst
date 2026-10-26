@@ -4,6 +4,9 @@ chown root:wheel /Library/LaunchDaemons/tr.niladsp.aracbaslat.plist
 chmod 644 /Library/LaunchDaemons/tr.niladsp.aracbaslat.plist
 launchctl unload /Library/LaunchDaemons/tr.niladsp.aracbaslat.plist 2>/dev/null
 launchctl load /Library/LaunchDaemons/tr.niladsp.aracbaslat.plist
+# Daemon AirSpeaker gibi mobile kullanıcısıyla çalışıyor (ses oturumu için);
+# root döneminden kalan anahtar/günlük dosyaları ona geçsin.
+chown mobile:mobile /var/mobile/Library/arac-airplay-key.pem /var/mobile/Library/Logs/arac-airplay.log /var/mobile/Library/Logs/arac-airplay.err 2>/dev/null
 chown root:wheel /Library/LaunchDaemons/tr.niladsp.aracairplay.plist
 chmod 644 /Library/LaunchDaemons/tr.niladsp.aracairplay.plist
 launchctl unload /Library/LaunchDaemons/tr.niladsp.aracairplay.plist 2>/dev/null

@@ -438,7 +438,10 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
 - (void)videoKaresi:(const uint8_t *)p uzunluk:(size_t)n {
     if (!p || n < 2) return;
-    BOOL anahtar = (p[0] != 0);
+    // Bayrak baytı: bit 0 anahtar kare, bit 1 "gösterme" (AirPlay daemon'u geç
+    // bağlanışta son IDR'den bu yana kareleri yalnız çözücüyü güncellemek için yollar).
+    BOOL anahtar = (p[0] & 1) != 0;
+    BOOL gosterme = (p[0] & 2) != 0;
     if (![self buKareIslenebilir:anahtar]) return;
 
     __sync_add_and_fetch(&_kareSayaci, 1);
@@ -479,6 +482,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     if (ekler && CFArrayGetCount(ekler) > 0) {
         CFMutableDictionaryRef ek = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(ekler, 0);
         CFDictionarySetValue(ek, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue);
+        if (gosterme) CFDictionarySetValue(ek, kCMSampleAttachmentKey_DoNotDisplay, kCFBooleanTrue);
     }
 
     id tasinan = CFBridgingRelease(ornek); // ARC bloğa taşısın

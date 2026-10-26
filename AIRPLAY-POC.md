@@ -103,3 +103,14 @@ Sıradaki: 5. adım — `video_process` Annex-B kareleri Araç'ın AVSampleBuffe
   yakalayıcı da hiçbir şey yazmadı → yakalanamayan SIGKILL. tahmin: jetsam bellek sınırı
   (GOP önbelleği 2-4 MB + realloc). plist'e JetsamProperties (öncelik 18, 96 MB) eklendi;
   etkisi henüz doğrulanmadı.
+
+## 6. adım (26 Ekim 2026) — ses daemon'da, kilitte çalışıyor
+
+- Ses artık Araç'ta değil aracairplay'de çalıyor (AirSpeaker yöntemi: mobile kullanıcısı,
+  platform-application, AVAudioSession Playback + MixWithOthers, RemoteIO). Ar3is: iPhone
+  kilitlenince ses sürüyor, kilit açılınca yansıtma kendiliğinden devam ediyor; iPad
+  kilitliyken de ses geliyor; senkron kusursuz.
+- Yansıtma başlayınca daemon Araç'ı SBSLaunchApplicationWithIdentifier ile açıyor.
+- Tuzak: iPad kilitliyken Araç askıda; dönünce GOP yeniden oynatımı aradaki görüntüyü
+  hızlandırılmış gösteriyordu. 'F' bayrak baytında bit 1 = gösterme; son kare dışındaki
+  yeniden oynatılan kareler kCMSampleAttachmentKey_DoNotDisplay ile yalnız çözülüyor.

@@ -1,4 +1,4 @@
-/* AirPlay mirror to loopback V/F/A transport. */
+/* AirPlay mirror to loopback V/F transport and local PCM output. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +17,7 @@
 #include <time.h>
 #include <execinfo.h>
 #include <AudioToolbox/AudioToolbox.h>
+#include "ios.h"
 #include "raop.h"
 #include "dnssd.h"
 #include "stream.h"
@@ -37,7 +38,7 @@ static unsigned char *cached_gop;
 static size_t cached_gop_len, cached_gop_capacity, cached_gop_frames;
 static struct timeval last_sent;
 
-static void logline(const char *fmt, ...);
+void logline(const char *fmt, ...);
 static void clear_gop(void) {
     free(cached_gop); cached_gop=NULL;
     cached_gop_len=cached_gop_capacity=cached_gop_frames=0;
@@ -63,7 +64,7 @@ static void cache_frame(const unsigned char *p, size_t n, int key) {
 
 static unsigned char *last_sps;
 static size_t last_sps_len;
-static void logline(const char *fmt, ...) {
+void logline(const char *fmt, ...) {
     char msg[8192], stamp[40];
     va_list ap;
     va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap); va_end(ap);
@@ -294,7 +295,20 @@ static void *accept_loop(void *unused) {
         if (client>=0 && cached_gop_frames) {
             struct timeval replay_timeout={2,0};
             if (setsockopt(client,SOL_SOCKET,SO_SNDTIMEO,&replay_timeout,sizeof replay_timeout)) disconnect_client();
-            if (client>=0 && send_packet(cached_gop,cached_gop_len)==0) {
+            /* Yeniden oynatılan karelerin yalnız sonuncusu gösterilsin (bayrak bit 1);
+             * yoksa Araç askıdan dönünce aradaki görüntüyü hızlandırılmış oynatıyor. */
+            for (size_t off=0,i=0; off+6<=cached_gop_len; i++) {
+                size_t n=((size_t)cached_gop[off+1]<<24)|((size_t)cached_gop[off+2]<<16)|((size_t)cached_gop[off+3]<<8)|cached_gop[off+4];
+                if (i+1<cached_gop_frames) cached_gop[off+5]|=2;
+                off+=5+n;
+            }
+            int sent=client>=0 ? send_packet(cached_gop,cached_gop_len) : -1;
+            for (size_t off=0; off+6<=cached_gop_len;) {
+                size_t n=((size_t)cached_gop[off+1]<<24)|((size_t)cached_gop[off+2]<<16)|((size_t)cached_gop[off+3]<<8)|cached_gop[off+4];
+                cached_gop[off+5]&=1;
+                off+=5+n;
+            }
+            if (sent==0) {
                 waiting_idr=0;
                 logline("GOP yollandı: %zu kare, %zu bayt",cached_gop_frames,cached_gop_len);
             }
@@ -342,7 +356,7 @@ static void audio_error(const char *where, OSStatus status) {
     }
 }
 static void audio_restart(unsigned char ct) {
-    audio_dispose(); audio_ct=ct; cookie_variant=0; cookie_confirmed=0; unknown_warned=0;
+    ses_temizle(); audio_dispose(); audio_ct=ct; cookie_variant=0; cookie_confirmed=0; unknown_warned=0;
 }
 static const char *cookie_name(void) {
     if (audio_ct==2) return cookie_variant==0?"ALACSpecificConfig (24)":cookie_variant==1?"alac atom (36)":"frma + alac (48)";
@@ -416,12 +430,12 @@ static void audio(void *c, raop_ntp_t *n, audio_decode_struct *d) {
     if (!d->data || d->data_len<=0) goto end;
     for (;;) {
         OSStatus rc=audio_converter?noErr:audio_create();
-        unsigned char packet[10+4096*4];
+        int16_t pcm[4096*2];
         UInt32 count=4096;
         AudioBufferList output={0}; output.mNumberBuffers=1;
         output.mBuffers[0].mNumberChannels=2;
-        output.mBuffers[0].mData=packet+10;
-        output.mBuffers[0].mDataByteSize=sizeof packet-10;
+        output.mBuffers[0].mData=pcm;
+        output.mBuffers[0].mDataByteSize=sizeof pcm;
         audio_input input={d->data,(UInt32)d->data_len,0,{0,0,(UInt32)d->data_len}};
         if (!rc) rc=AudioConverterFillComplexBuffer(audio_converter,audio_feed,&input,&count,&output,NULL);
         else count=0;
@@ -436,9 +450,8 @@ static void audio(void *c, raop_ntp_t *n, audio_decode_struct *d) {
             if (!cookie_confirmed) { logline("ses ct=%u cookie=%s calisiyor",audio_ct,cookie_name()); cookie_confirmed=1; }
             audio_decoded++;
             size_t bytes=output.mBuffers[0].mDataByteSize;
-            if (bytes>sizeof packet-10) goto end;
-            packet[0]='A'; put32(packet+1,5+bytes); put32(packet+5,44100); packet[9]=2;
-            if (client>=0) send_packet(packet,10+bytes);
+            if (bytes>sizeof pcm) goto end;
+            ses_yaz(pcm,bytes/4);
         }
         break;
     }
@@ -448,7 +461,9 @@ end:
 static void reset(void *c, int r) { (void)c;(void)r; }
 static void vreset(void *c, reset_type_t r) { (void)c;(void)r; }
 static double volume(void *c) { (void)c;return 0.0; }
-static void setvolume(void *c, float f) { (void)c;(void)f; }
+static void setvolume(void *c, float f) { (void)c;ses_duzey(f); }
+static void audio_flush(void *c) { (void)c; pthread_mutex_lock(&videolock); ses_temizle(); if (audio_converter) AudioConverterReset(audio_converter); pthread_mutex_unlock(&videolock); }
+static void video_value(void *c, float f) { (void)c;(void)f; }
 static void metadata(void *c,const void *p,int n) { (void)c;(void)p;(void)n; }
 static void remote(void *c,const char *a,const char *b) { (void)c;(void)a;(void)b; }
 static void progress(void *c,uint32_t *a,uint32_t *b,uint32_t *d) { (void)c;(void)a;(void)b;(void)d; }
@@ -457,7 +472,7 @@ static void format(void *c,unsigned char *ct,unsigned short *spf,bool *screen,bo
     logline("ses SETUP ct=%u spf=%u usingScreen=%d isMedia=%d audioFormat=0x%016"PRIx64,*ct,*spf,*screen,*media,*af);
     audio_restart(*ct); pthread_mutex_unlock(&videolock);
 }
-static void running(void *c,bool b) { (void)c;logline("mirror %s",b?"başladı":"bitti"); }
+static void running(void *c,bool b) { (void)c;logline("mirror %s",b?"başladı":"bitti"); if (b) logline("Araç acma is parcacigi: %d",uygulama_ac()); }
 static void admit(void *c,char *id,char *model,char *name,bool *ok) { (void)c;*ok=true;logline("iPhone bağlandı id=%s model=%s name=%s",id?id:"",model?model:"",name?name:""); }
 static void pin(void *c,char *p) { (void)c;(void)p; }
 static void regclient(void *c,const char *id,const char *pk,const char *name) { (void)c;(void)id;(void)pk;(void)name; }
@@ -484,6 +499,7 @@ int main(int argc,char **argv) {
     int fatal[]={SIGSEGV,SIGBUS,SIGABRT,SIGILL,SIGFPE};
     for (size_t i=0;i<sizeof fatal/sizeof *fatal;i++) signal(fatal[i],crashed);
     atexit(exited);
+    if (ses_baslat()) logline("Yerel ses baslatilamadi; goruntu devam ediyor");
     debug_logs=debug;
     int local_started=0;
     int result=1,error=0,raop_registered=0,airplay_registered=0;
@@ -496,13 +512,13 @@ int main(int argc,char **argv) {
     raop_callbacks_t cb={0};
     cb.audio_process=audio;cb.video_process=video;cb.video_pause=noop;cb.video_resume=noop;
     cb.conn_feedback=noop;cb.conn_reset=reset;cb.video_reset=vreset;cb.video_set_codec_and_size=geometry;
-    cb.conn_init=noop;cb.conn_destroy=noop;cb.audio_flush=noop;cb.video_flush=noop;
+    cb.conn_init=noop;cb.conn_destroy=noop;cb.audio_flush=audio_flush;cb.video_flush=noop;
     cb.audio_set_client_volume=volume;cb.audio_set_volume=setvolume;cb.audio_set_metadata=metadata;
     cb.audio_set_coverart=metadata;cb.audio_stop_coverart_rendering=noop;cb.audio_remote_control_id=remote;
     cb.audio_set_progress=progress;cb.audio_get_format=format;cb.mirror_video_running=running;
     cb.report_client_request=admit;cb.display_pin=pin;cb.register_client=regclient;cb.check_register=registered;
-    cb.passwd=NULL;cb.export_dacp=remote;cb.on_video_play=play;cb.on_video_scrub=setvolume;
-    cb.on_video_rate=setvolume;cb.on_video_stop=noop;cb.on_video_acquire_playback_info=info;
+    cb.passwd=NULL;cb.export_dacp=remote;cb.on_video_play=play;cb.on_video_scrub=video_value;
+    cb.on_video_rate=video_value;cb.on_video_stop=noop;cb.on_video_acquire_playback_info=info;
     cb.on_video_playlist_remove=removeplaylist;cb.get_custom_profile=custom;
     if(start_local()) { logline("Yerel sunucu: %s",strerror(errno)); goto done; }
     local_started=1;
@@ -548,10 +564,14 @@ done:
     if(raop_registered) dnssd_unregister_raop(dns);
     if(raop) { raop_stop_httpd(raop);raop_destroy(raop); }
     audio_dispose();
+    ses_kapat();
     if(dns) dnssd_destroy(dns);
     disconnect_client();
     clear_gop();
     free(cached_sps); free(cached_pps); free(cached_v); free(last_sps);
-    logline("Kapandi"); fclose(logfile);
+    logline("Kapandi");
+    pthread_mutex_lock(&loglock);
+    fclose(logfile); logfile=NULL;
+    pthread_mutex_unlock(&loglock);
     return result;
 }
