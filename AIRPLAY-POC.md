@@ -114,3 +114,6 @@ Sıradaki: 5. adım — `video_process` Annex-B kareleri Araç'ın AVSampleBuffe
 - Tuzak: iPad kilitliyken Araç askıda; dönünce GOP yeniden oynatımı aradaki görüntüyü
   hızlandırılmış gösteriyordu. 'F' bayrak baytında bit 1 = gösterme; son kare dışındaki
   yeniden oynatılan kareler kCMSampleAttachmentKey_DoNotDisplay ile yalnız çözülüyor.
+- Ar3is doğruladı (04:3x): Araç yansıtmayla kendiliğinden açılıyor; iPad kilidinden dönüşte
+  hızlandırma 10-15 sn'den bir iki ana indi (kalan: Araç'ın soket tamponundaki canlı
+  kareler). iPad ekranı arabada hep açık kalacağı için bu kadarı kabul edildi.
