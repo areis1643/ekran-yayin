@@ -3,3 +3,6 @@ Ekran.xcodeproj/
 araclar/ipa3/
 iPad/.theos/
 iPad/packages/
+airplay/vendor/
+airplay/deps/
+airplay/build/

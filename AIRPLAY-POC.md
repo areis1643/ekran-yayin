@@ -67,3 +67,19 @@ SPS/PPS) günlüğe yazmak. SPS'ten profil/çözünürlük okunur.
 
 Kural: görsel tasarım değişikliği önce Telegram'dan (dev-notify --file) onaya gider. Kod yazımı
 DELEGE kurallarıyla işçilere (sol-amele / deepseek-amele) verilir, ana oturum denetler.
+
+## Sonuç (26 Ekim 2026, 03:12) — H.264, devam
+
+`airplay/poc/aracekran` iPad'de (hotspot) ölçtü; iPhone14,3, iOS 27.0.1, AirPlay/980.77.1:
+- `video_set_codec_and_size codec=H264`, ilk pakette SPS+PPS (Annex-B, `27 64 00 1e`).
+- SPS: **High profil (100), level 3.0**, 4:2:0, progresif. Dikey telefonda 334x720
+  (1280x720 ilanın içine x_offset=473 ile yerleşiyor). iPad 2 A5 High profili çözer.
+- HEVC gelmedi (features bit 42 kapalıyken).
+- Tuzak: Denetim Merkezi'nin ses listesinden seçilince yalnız `type 96` ses akışı açılıyor
+  (`TEARDOWN 96=1, 110=0`); yansıtma yalnız Ekran Yansıtma düğmesinden (`isScreenMirroringSession`,
+  `type 110`).
+- Araç zinciri: `airplay/build-openssl.sh` (1.1.1w), `airplay/build-libplist.sh` (2.8.0),
+  `make -C airplay/poc`; iPad'e `araclar/ipad.sh put` + `sh /var/mobile/baslat.sh -d`.
+  SDK .tbd'lerinde memcpy/memset vb. eksik; `airplay/poc/sdkstub/` yamalı stub'ı kullanır.
+
+Sıradaki: 5. adım — `video_process` Annex-B kareleri Araç'ın AVSampleBufferDisplayLayer yoluna.
