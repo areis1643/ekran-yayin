@@ -15,7 +15,7 @@ LDFLAGS := -target armv7-apple-ios9.0 -isysroot $(S) -L$(ROOT)/poc/sdkstub -L$(R
 .PHONY: all clean
 all: $(BUILD)/aracairplay
 $(BUILD)/aracairplay: $(OBJECTS) $(ROOT)/alici/Makefile $(wildcard $(ROOT)/poc/sdkstub/*.tbd)
-	$(CC) $(LDFLAGS) $(OBJECTS) -lcrypto -lplist-2.0 -lpthread -o $@
+	$(CC) $(LDFLAGS) $(OBJECTS) -lcrypto -lplist-2.0 -lpthread -framework AudioToolbox -framework CoreFoundation -o $@
 	$(T)/ldid -S $@
 $(BUILD)/obj-alici/%.o: $(LIB)/%.c $(ROOT)/poc/uyum/ios9.h
 	@mkdir -p $(@D)

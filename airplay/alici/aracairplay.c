@@ -1,4 +1,4 @@
-/* AirPlay mirror to loopback V/F transport. No audio or decoding. */
+/* AirPlay mirror to loopback V/F/A transport. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +16,7 @@
 #include <netinet/tcp.h>
 #include <time.h>
 #include <execinfo.h>
+#include <AudioToolbox/AudioToolbox.h>
 #include "raop.h"
 #include "dnssd.h"
 #include "stream.h"
@@ -320,7 +321,130 @@ static int geometry(void *c, video_codec_t codec, unsigned short ws, unsigned sh
     return 0;
 }
 static void noop(void *c) { (void)c; }
-static void audio(void *c, raop_ntp_t *n, audio_decode_struct *d) { (void)c;(void)n;(void)d; }
+/* Audio state and counters share videolock with the transport. */
+#define AUDIO_NODT ((OSStatus)0x6e6f6474)
+static AudioConverterRef audio_converter;
+static unsigned char audio_ct;
+static unsigned cookie_variant;
+static int cookie_confirmed, unknown_warned;
+static uint64_t audio_packets, audio_decoded, audio_errors, audio_errors_total;
+static void audio_dispose(void) {
+    if (audio_converter) AudioConverterDispose(audio_converter);
+    audio_converter=NULL;
+}
+static void audio_error(const char *where, OSStatus status) {
+    audio_errors++; audio_errors_total++;
+    if (audio_errors_total<=5) {
+        uint32_t u=(uint32_t)status; char code[5];
+        for (int i=0;i<4;i++) { unsigned ch=(u>>(24-8*i))&255; code[i]=ch>=32 && ch<=126?ch:'.'; }
+        code[4]=0;
+        logline("ses %s ct=%u cookie=%u OSStatus=%"PRId32" ('%s')",where,audio_ct,cookie_variant,(int32_t)status,code);
+    }
+}
+static void audio_restart(unsigned char ct) {
+    audio_dispose(); audio_ct=ct; cookie_variant=0; cookie_confirmed=0; unknown_warned=0;
+}
+static const char *cookie_name(void) {
+    if (audio_ct==2) return cookie_variant==0?"ALACSpecificConfig (24)":cookie_variant==1?"alac atom (36)":"frma + alac (48)";
+    return cookie_variant==0?"raw AudioSpecificConfig":"ES_Descriptor";
+}
+static OSStatus audio_create(void) {
+    AudioStreamBasicDescription in={0}, out={0};
+    in.mSampleRate=44100; in.mChannelsPerFrame=2;
+    in.mFormatID=audio_ct==2?kAudioFormatAppleLossless:audio_ct==8?kAudioFormatMPEG4AAC_ELD:kAudioFormatMPEG4AAC;
+    in.mFramesPerPacket=audio_ct==2?352:audio_ct==8?480:1024;
+    if (audio_ct==2) { in.mBitsPerChannel=16; in.mFormatFlags=kAppleLosslessFormatFlag_16BitSourceData; }
+    out.mSampleRate=44100; out.mFormatID=kAudioFormatLinearPCM;
+    out.mFormatFlags=kAudioFormatFlagIsSignedInteger|kAudioFormatFlagIsPacked;
+    out.mBytesPerPacket=out.mBytesPerFrame=4; out.mFramesPerPacket=1;
+    out.mChannelsPerFrame=2; out.mBitsPerChannel=16;
+    OSStatus rc=AudioConverterNew(&in,&out,&audio_converter);
+    if (rc) return rc;
+    static const unsigned char alac[36]={
+        0,0,0,0x24, 'a','l','a','c', 0,0,0,0,
+        0,0,1,0x60, 0,0x10,0x28,0x0a, 0x0e,2,0,0xff,
+        0,0,0,0, 0,0,0,0, 0,0,0xac,0x44};
+    static const unsigned char eld[]={0xf8,0xe8,0x50,0}, lc[]={0x12,0x10};
+    unsigned char wrapped[64]; const unsigned char *cookie; UInt32 len;
+    if (audio_ct==2) {
+        cookie=alac+(cookie_variant==0?12:0); len=cookie_variant==0?24:36;
+        if (cookie_variant==2) {
+            const unsigned char frma[12]={0,0,0,12,'f','r','m','a','a','l','a','c'};
+            memcpy(wrapped,frma,12); memcpy(wrapped+12,alac,36); cookie=wrapped; len=48;
+        }
+    } else {
+        cookie=audio_ct==8?eld:lc; len=audio_ct==8?4:2;
+        if (cookie_variant) {
+            /* ES_ID=1, MPEG-4 audio (0x40), audio stream, no SL packetization. */
+            unsigned char prefix[]={3,0,0,1,0,4,0,0x40,0x15,0,0,0,0,0,0,0,0,0,0,0,5,0};
+            prefix[1]=23+len; prefix[6]=15+len; prefix[21]=len;
+            memcpy(wrapped,prefix,sizeof prefix); memcpy(wrapped+sizeof prefix,cookie,len);
+            unsigned off=sizeof prefix+len;
+            wrapped[off++]=6; wrapped[off++]=1; wrapped[off++]=2;
+            cookie=wrapped; len=off;
+        }
+    }
+    rc=AudioConverterSetProperty(audio_converter,kAudioConverterDecompressionMagicCookie,len,cookie);
+    if (rc) audio_dispose();
+    return rc;
+}
+typedef struct {
+    const void *bytes; UInt32 length; int used;
+    AudioStreamPacketDescription packet;
+} audio_input;
+static OSStatus audio_feed(AudioConverterRef converter, UInt32 *packets,
+                           AudioBufferList *buffers, AudioStreamPacketDescription **desc, void *context) {
+    (void)converter; audio_input *input=context;
+    if (input->used || !*packets) { *packets=0; return AUDIO_NODT; }
+    input->used=1; *packets=1;
+    buffers->mNumberBuffers=1;
+    buffers->mBuffers[0].mNumberChannels=2;
+    buffers->mBuffers[0].mData=(void *)input->bytes;
+    buffers->mBuffers[0].mDataByteSize=input->length;
+    if (desc) *desc=&input->packet;
+    return noErr;
+}
+static void audio(void *c, raop_ntp_t *n, audio_decode_struct *d) {
+    (void)c; (void)n;
+    pthread_mutex_lock(&videolock);
+    audio_packets++;
+    if (audio_ct!=d->ct) audio_restart(d->ct);
+    if (audio_ct!=2 && audio_ct!=4 && audio_ct!=8) {
+        if (!unknown_warned) { logline("ses bilinmeyen ct=%u; atiliyor",audio_ct); unknown_warned=1; }
+        goto end;
+    }
+    if (!d->data || d->data_len<=0) goto end;
+    for (;;) {
+        OSStatus rc=audio_converter?noErr:audio_create();
+        unsigned char packet[10+4096*4];
+        UInt32 count=4096;
+        AudioBufferList output={0}; output.mNumberBuffers=1;
+        output.mBuffers[0].mNumberChannels=2;
+        output.mBuffers[0].mData=packet+10;
+        output.mBuffers[0].mDataByteSize=sizeof packet-10;
+        audio_input input={d->data,(UInt32)d->data_len,0,{0,0,(UInt32)d->data_len}};
+        if (!rc) rc=AudioConverterFillComplexBuffer(audio_converter,audio_feed,&input,&count,&output,NULL);
+        else count=0;
+        if (rc && rc!=AUDIO_NODT) {
+            audio_error("decode/create",rc);
+            audio_dispose();
+            unsigned variants=audio_ct==2?3:2;
+            if (!cookie_confirmed && cookie_variant+1<variants) { cookie_variant++; continue; }
+            goto end;
+        }
+        if (count && output.mBuffers[0].mDataByteSize) {
+            if (!cookie_confirmed) { logline("ses ct=%u cookie=%s calisiyor",audio_ct,cookie_name()); cookie_confirmed=1; }
+            audio_decoded++;
+            size_t bytes=output.mBuffers[0].mDataByteSize;
+            if (bytes>sizeof packet-10) goto end;
+            packet[0]='A'; put32(packet+1,5+bytes); put32(packet+5,44100); packet[9]=2;
+            if (client>=0) send_packet(packet,10+bytes);
+        }
+        break;
+    }
+end:
+    pthread_mutex_unlock(&videolock);
+}
 static void reset(void *c, int r) { (void)c;(void)r; }
 static void vreset(void *c, reset_type_t r) { (void)c;(void)r; }
 static double volume(void *c) { (void)c;return 0.0; }
@@ -328,7 +452,11 @@ static void setvolume(void *c, float f) { (void)c;(void)f; }
 static void metadata(void *c,const void *p,int n) { (void)c;(void)p;(void)n; }
 static void remote(void *c,const char *a,const char *b) { (void)c;(void)a;(void)b; }
 static void progress(void *c,uint32_t *a,uint32_t *b,uint32_t *d) { (void)c;(void)a;(void)b;(void)d; }
-static void format(void *c,unsigned char *ct,unsigned short *spf,bool *screen,bool *media,uint64_t *af) { (void)c;(void)ct;(void)spf;(void)screen;(void)media;(void)af; }
+static void format(void *c,unsigned char *ct,unsigned short *spf,bool *screen,bool *media,uint64_t *af) {
+    (void)c; pthread_mutex_lock(&videolock);
+    logline("ses SETUP ct=%u spf=%u usingScreen=%d isMedia=%d audioFormat=0x%016"PRIx64,*ct,*spf,*screen,*media,*af);
+    audio_restart(*ct); pthread_mutex_unlock(&videolock);
+}
 static void running(void *c,bool b) { (void)c;logline("mirror %s",b?"başladı":"bitti"); }
 static void admit(void *c,char *id,char *model,char *name,bool *ok) { (void)c;*ok=true;logline("iPhone bağlandı id=%s model=%s name=%s",id?id:"",model?model:"",name?name:""); }
 static void pin(void *c,char *p) { (void)c;(void)p; }
@@ -401,6 +529,8 @@ int main(int argc,char **argv) {
         if(now-summary>=30) {
             pthread_mutex_lock(&videolock);
             logline("son 30 sn: %"PRIu64" kare, %"PRIu64" anahtar, %"PRIu64" atlanan, önbellek %zu kare/%zu bayt",frames,keyframes,skipped,cached_gop_frames,cached_gop_len);
+            logline("son 30 sn ses: paket=%"PRIu64" cozulen=%"PRIu64" hata=%"PRIu64,audio_packets,audio_decoded,audio_errors);
+            audio_packets=audio_decoded=audio_errors=0;
             frames=skipped=keyframes=0; pthread_mutex_unlock(&videolock); summary=now;
         }
         fd_set fds;FD_ZERO(&fds);int maxfd=-1,fd[2];
@@ -417,6 +547,7 @@ done:
     if(airplay_registered) dnssd_unregister_airplay(dns);
     if(raop_registered) dnssd_unregister_raop(dns);
     if(raop) { raop_stop_httpd(raop);raop_destroy(raop); }
+    audio_dispose();
     if(dns) dnssd_destroy(dns);
     disconnect_client();
     clear_gop();

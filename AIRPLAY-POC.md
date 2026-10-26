@@ -83,3 +83,23 @@ DELEGE kurallarıyla işçilere (sol-amele / deepseek-amele) verilir, ana oturum
   SDK .tbd'lerinde memcpy/memset vb. eksik; `airplay/poc/sdkstub/` yamalı stub'ı kullanır.
 
 Sıradaki: 5. adım — `video_process` Annex-B kareleri Araç'ın AVSampleBufferDisplayLayer yoluna.
+
+## 5. adım sonucu (26 Ekim 2026) — görüntü çalışıyor, ses bizim daemon'da
+
+- `aracairplay` daemon'u + Araç'ın ikinci kaynağı (commit f7e3149): Ar3is'in denemesinde
+  "kusursuza yakın", gecikme hissedilmiyor; dik 356x768, yatay 1024x474.
+- Ses: yansıtma sürerken iOS ses çıkışını AirSpeaker'a seçtiriyor ama o anda yansıtma
+  kopuyor (Ar3is denedi). Bu yüzden ses daemon'da çözülüp Araç'a 'A' paketiyle gidiyor
+  (AudioConverter; ct=8 AAC-ELD, ct=4 AAC-LC, ct=2 ALAC). Tuzak: çözücü besleme geri
+  çağırmasında "0 paket + noErr" akış sonu sayılır, sonra çözücü çıktı vermez; ayrı bir
+  durum kodu döndürülmeli.
+- AirSpeaker (armv7 ikilisi, yalnız string/sembol taraması): ALAC'ı AudioConverter ile
+  `frma`+`alac` atomlu çerezle çözüyor, çıkışı AudioUnit (mixer + varispeed) ile yapıyor,
+  RTP zaman damgasıyla senkron ve yeniden isteme var; imzada yalnız `platform-application`.
+- Ses ölçümü: yansıtmada ct=8 AAC-ELD (spf 480), ham AudioSpecificConfig çerezi kabul
+  edildi; yalnız ses (müzik) oturumunda ct=2 ALAC, 24 baytlık ALACSpecificConfig yetti.
+  Ar3is: ses-görüntü senkronu "mükemmel", hata=0.
+- Açık: daemon üç kez (03:31, 03:35, 03:59) rapor bırakmadan yeniden başladı; çökme
+  yakalayıcı da hiçbir şey yazmadı → yakalanamayan SIGKILL. tahmin: jetsam bellek sınırı
+  (GOP önbelleği 2-4 MB + realloc). plist'e JetsamProperties (öncelik 18, 96 MB) eklendi;
+  etkisi henüz doğrulanmadı.
