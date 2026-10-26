@@ -41,6 +41,8 @@ void *memset(void *hedef, int deger, size_t uzunluk) {
 // Sunucu bilgileri
 static NSString *const kDurumBekliyor = @"iPhone bekleniyor (ReplayKit 8889 / AirPlay Ekran Yansıtma)";
 static const uint32_t kAzamiYuk = 4u * 1024u * 1024u;
+static NSString *const kBoyutDegisti = @"AracGoruntuBoyutuDegisti";
+static NSString *const kOlcekKipiAnahtari = @"olcekKipi";
 
 #pragma mark - Küçük yardımcılar
 
@@ -189,6 +191,8 @@ typedef struct {
 - (int32_t)kareSayaciniSifirla;
 - (int32_t)sesSayaciniSifirla;
 - (NSString *)sesDurumu;
+- (int)yansitmaDurumu;
+- (CGSize)goruntuBoyutu;
 - (void)sesTamponuDoldur:(AudioQueueBufferRef)tampon;
 @end
 
@@ -221,6 +225,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
     volatile int32_t _kareSayaci;
     volatile int32_t _sesSayaci; // tanı: saniyedeki ses paketi
+    volatile int _yansitma; // AirPlay 'K' paketinden: -1 bilinmiyor, 0 kapalı, 1 açık
+    CGSize _boyut;
 }
 
 - (instancetype)initWithKatman:(AVSampleBufferDisplayLayer *)katman
@@ -238,6 +244,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
         _ad = [ad copy];
         _secici = [EtkinKaynak paylasilan];
         _anahtarSeyrek = [ad isEqualToString:@"AirPlay"];
+        _yansitma = -1;
         memset(&_halka, 0, sizeof(_halka));
         pthread_mutex_init(&_halkaKilit, NULL);
     }
@@ -299,6 +306,21 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     return __sync_lock_test_and_set(&_sesSayaci, 0);
 }
 
+- (int)yansitmaDurumu {
+    return _yansitma;
+}
+
+- (CGSize)goruntuBoyutu {
+    @synchronized (self) { return _boyut; }
+}
+
+// Ölçek kararı akış boyutuna bağlı; katman ana kuyrukta yeniden ayarlanır.
+- (void)boyutuDuyur {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:kBoyutDegisti object:self];
+    });
+}
+
 - (NSString *)sesDurumu {
     return [NSString stringWithFormat:@"%.0f Hz/%d kanal, kuyruk %@", _sesHizi, _sesKanali, _sesKuyrugu ? @"var" : @"yok"];
 }
@@ -332,6 +354,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
             _soket = -1;
             [self setBagli:NO];
             [self setBekliyor:YES]; // yeniden bağlanınca anahtar kare bekle
+            _yansitma = -1;
             [self sesTamponunuTemizle];
         }
     }
@@ -365,6 +388,9 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
                     break;
                 case 'A':
                     [self sesPaketi:yuk uzunluk:uzunluk];
+                    break;
+                case 'K': // canlılık; yükü varsa yansıtmanın açık olup olmadığı
+                    if (yuk && uzunluk >= 1) _yansitma = yuk[0] ? 1 : 0;
                     break;
                 default:
                     break;
@@ -402,6 +428,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self.goruntuKatmani flush];
             });
+            [self boyutuDuyur];
         }
         return;
     }
@@ -421,12 +448,14 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
         _sps = sps;
         _pps = pps;
         _bekliyor = YES; // yeni biçimden sonra anahtar kare bekle
+        _boyut = CMVideoFormatDescriptionGetPresentationDimensions(yeni, YES, YES);
     }
 
     // Eski kareleri/çözücüyü bırak; ana kuyrukta sıralı olsun.
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.goruntuKatmani flush];
     });
+    [self boyutuDuyur];
 }
 
 - (CMVideoFormatDescriptionRef)kopyaBicim {
@@ -696,6 +725,10 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     NSTimer *_durumZamanlayici;
     int _karesizSaniye;
     BOOL _goruntuGeldi; // açılıştaki bekleyişi kesintiden ayırmak için
+    CGSize _akisBoyutu;
+    NSInteger _olcekKipi; // 0 otomatik, 1 hep doldur, 2 hep sığdır
+    int _gosterimSaniye; // olağan durumda etiket bu kadar görünür kalır
+    int _bildirimSaniye; // çift dokunma bildirimi bitene kadar durum yazısı ezilmez
 }
 
 - (void)viewDidLoad {
@@ -703,6 +736,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     self.view.backgroundColor = [UIColor blackColor];
 
     _videoKatmani = [[AVSampleBufferDisplayLayer alloc] init];
+    _olcekKipi = [[NSUserDefaults standardUserDefaults] integerForKey:kOlcekKipiAnahtari];
     _videoKatmani.videoGravity = AVLayerVideoGravityResizeAspect;
     _videoKatmani.backgroundColor = [UIColor blackColor].CGColor;
     _videoKatmani.frame = self.view.bounds;
@@ -717,10 +751,21 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     _durumEtiketi.userInteractionEnabled = NO;
     [self.view addSubview:_durumEtiketi];
 
+    UITapGestureRecognizer *ciftDokunma =
+        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(olcekKipiniDegistir)];
+    ciftDokunma.numberOfTapsRequired = 2;
+    [self.view addGestureRecognizer:ciftDokunma];
+
     UITapGestureRecognizer *dokunma =
         [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(durumuDegistir)];
     dokunma.numberOfTapsRequired = 1;
+    [dokunma requireGestureRecognizerToFail:ciftDokunma];
     [self.view addGestureRecognizer:dokunma];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(boyutDegisti:)
+                                                 name:kBoyutDegisti
+                                               object:nil];
 
     // Ses oturumu: yalnızca çalma, uygulama öndeyken etkin.
     NSError *hata = nil;
@@ -751,6 +796,56 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     _videoKatmani.frame = self.view.bounds;
 }
 
+#pragma mark Ölçek
+
+- (void)boyutDegisti:(NSNotification *)bildirim {
+    Alici *kaynak = bildirim.object;
+    if (![[EtkinKaynak paylasilan] etkinMi:kaynak.ad]) return;
+    _akisBoyutu = [kaynak goruntuBoyutu];
+    [self olcegiUygula];
+}
+
+// Yatay akış (iPhone yatay, ~2,2:1) 4:3 ekranı ancak yanlardan kırpılarak doldurur;
+// dikey akışı doldurmak ortadaki şeridi büyütmekten öteye geçmez, o yüzden sığdırılır.
+- (void)olcegiUygula {
+    BOOL doldur;
+    if (_olcekKipi == 1) {
+        doldur = YES;
+    } else if (_olcekKipi == 2) {
+        doldur = NO;
+    } else {
+        doldur = _akisBoyutu.width > _akisBoyutu.height * 1.05;
+    }
+    NSString *istenen = doldur ? AVLayerVideoGravityResizeAspectFill : AVLayerVideoGravityResizeAspect;
+    if ([_videoKatmani.videoGravity isEqualToString:istenen]) return;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _videoKatmani.videoGravity = istenen;
+    [CATransaction commit];
+}
+
+- (void)olcekKipiniDegistir {
+    _olcekKipi = (_olcekKipi + 1) % 3;
+    [[NSUserDefaults standardUserDefaults] setInteger:_olcekKipi forKey:kOlcekKipiAnahtari];
+    [self olcegiUygula];
+    NSArray *adlar = @[ @"otomatik (yatay görüntü doldurur, dikey sığar)",
+                        @"hep doldur (kenarlar kırpılır)",
+                        @"hep sığdır (siyah bant kalır)" ];
+    [self etiketiGoster:[NSString stringWithFormat:@"Görüntü: %@ • değiştirmek için iki kez dokun",
+                         adlar[_olcekKipi]]];
+    _bildirimSaniye = 3;
+}
+
+- (void)etiketiGoster:(NSString *)metin {
+    _durumEtiketi.text = metin;
+    _durumEtiketi.hidden = NO;
+    _gosterimSaniye = 0;
+    [_durumEtiketi sizeToFit];
+    CGRect cerceve = _durumEtiketi.frame;
+    cerceve.origin = CGPointMake(8, 8);
+    _durumEtiketi.frame = cerceve;
+}
+
 - (void)durumuGuncelle {
     int32_t replayKare = [_replayAlici kareSayaciniSifirla];
     int32_t replaySes = [_replayAlici sesSayaciniSifirla];
@@ -761,16 +856,29 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     BOOL replayBagli = [_replayAlici bagliMi];
     BOOL airplayBagli = [_airplayAlici bagliMi];
     BOOL airplayEtkin = [[EtkinKaynak paylasilan] etkinMi:_airplayAlici.ad];
+    int yansitma = [_airplayAlici yansitmaDurumu];
 
     // Durağan ekranda ReplayKit kare yollamayabilir; kesinti sayılması için ses de susmalı.
-    if (kare > 0 || ses > 0) {
+    // AirPlay'de durağan ekran (duraklatılmış video, fotoğraf) hiç kare yollamaz;
+    // yansıtma açık dendikçe bu kesinti değildir.
+    BOOL durgunYansitma = airplayEtkin && airplayBagli && yansitma == 1;
+    if (kare > 0 || ses > 0 || durgunYansitma) {
         _karesizSaniye = 0;
-        _goruntuGeldi = YES;
+        if (kare > 0 || ses > 0) _goruntuGeldi = YES;
     } else {
         _karesizSaniye++;
     }
 
-    if (_goruntuGeldi && _karesizSaniye >= 5) {
+    if (_bildirimSaniye > 0) {
+        _bildirimSaniye--;
+        return;
+    }
+
+    if (_goruntuGeldi && airplayEtkin && airplayBagli && yansitma == 0) {
+        _durumEtiketi.text = @"yansıtma kapandı • iPhone'da Ekran Yansıtma'yı yeniden seç";
+        _durumEtiketi.hidden = NO;
+        _gosterimSaniye = 0;
+    } else if (_goruntuGeldi && _karesizSaniye >= 5) {
         // Arama gibi kesintide bağlantı kalsa da kare gelmeyebilir; kullanıcıya açıkça göster.
         if (airplayEtkin) {
             _durumEtiketi.text = [NSString stringWithFormat:@"görüntü yok (%d sn) • iPhone'da Ekran Yansıtma'yı yeniden seç", _karesizSaniye];
@@ -778,14 +886,18 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
             _durumEtiketi.text = [NSString stringWithFormat:@"görüntü yok (%d sn) • arama bitince kendiliğinden döner, dönmezse iPhone'da yayını yeniden başlat", _karesizSaniye];
         }
         _durumEtiketi.hidden = NO;
+        _gosterimSaniye = 0;
     } else if ((airplayEtkin && airplayBagli) || replayBagli) {
         // AirPlay daemon'u hep dinlediği için bağlantısı tek başına yansıtma demek
         // değil; yansıtma ancak daemon 'V' yollayınca (etkin) sayılır.
         Alici *kaynak = (airplayEtkin && airplayBagli) ? _airplayAlici : _replayAlici;
         _durumEtiketi.text = [NSString stringWithFormat:@"%@ • bağlandı • %d kare/sn • ses %d paket/sn • %@",
                               kaynak.ad, kare, ses, [kaynak sesDurumu]];
+        // Olağan durumda yazı görüntünün üstünde kalmasın; dokununca yeniden çıkar.
+        if (!_durumEtiketi.hidden && ++_gosterimSaniye >= 5) _durumEtiketi.hidden = YES;
     } else {
         _durumEtiketi.text = kDurumBekliyor;
+        _durumEtiketi.hidden = NO;
     }
     [_durumEtiketi sizeToFit];
     CGRect cerceve = _durumEtiketi.frame;
@@ -795,6 +907,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
 - (void)durumuDegistir {
     _durumEtiketi.hidden = !_durumEtiketi.hidden;
+    _gosterimSaniye = 0;
 }
 
 - (BOOL)prefersStatusBarHidden {
@@ -814,6 +927,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_durumZamanlayici invalidate];
     [_replayAlici durdur];
     [_airplayAlici durdur];

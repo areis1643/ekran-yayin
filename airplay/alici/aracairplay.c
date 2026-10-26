@@ -31,6 +31,8 @@ static pthread_mutex_t videolock = PTHREAD_MUTEX_INITIALIZER;
 static volatile sig_atomic_t stopping;
 static uint64_t frames, skipped, keyframes;
 static int client = -1, listener = -1, waiting_idr = 1, debug_logs;
+/* Araç'a 'K' ile bildirilir: durağan ekranda kare gelmemesi kesinti sayılmasın. */
+static volatile int mirroring;
 static pthread_t accept_thread;
 static unsigned char *cached_sps, *cached_pps, *cached_v;
 static size_t cached_sps_len, cached_pps_len, cached_v_len;
@@ -292,7 +294,7 @@ static void *accept_loop(void *unused) {
         if (client>=0) {
             struct timeval now; gettimeofday(&now,NULL);
             if ((double)(now.tv_sec-last_sent.tv_sec)+(now.tv_usec-last_sent.tv_usec)/1000000.0>=1.0) {
-                const unsigned char keepalive[5]={'K',0,0,0,0};
+                const unsigned char keepalive[6]={'K',0,0,0,1,(unsigned char)(mirroring?1:0)};
                 send_packet(keepalive,sizeof keepalive);
             }
         }
@@ -490,7 +492,10 @@ static void format(void *c,unsigned char *ct,unsigned short *spf,bool *screen,bo
     logline("ses SETUP ct=%u spf=%u usingScreen=%d isMedia=%d audioFormat=0x%016"PRIx64,*ct,*spf,*screen,*media,*af);
     audio_restart(*ct); pthread_mutex_unlock(&videolock);
 }
-static void running(void *c,bool b) { (void)c;logline("mirror %s",b?"başladı":"bitti"); if (b) logline("Araç acma is parcacigi: %d",uygulama_ac()); }
+static void running(void *c,bool b) {
+    (void)c; mirroring=b; logline("mirror %s",b?"başladı":"bitti");
+    if (b) logline("Araç acma is parcacigi: %d",uygulama_ac());
+}
 static void admit(void *c,char *id,char *model,char *name,bool *ok) { (void)c;*ok=true;logline("iPhone bağlandı id=%s model=%s name=%s",id?id:"",model?model:"",name?name:""); }
 static void pin(void *c,char *p) { (void)c;(void)p; }
 static void regclient(void *c,const char *id,const char *pk,const char *name) { (void)c;(void)id;(void)pk;(void)name; }
