@@ -41,7 +41,7 @@ void *memset(void *hedef, int deger, size_t uzunluk) {
 // Sunucu bilgileri
 static NSString *const kDurumBekliyor = @"iPhone bekleniyor (ReplayKit 8889 / AirPlay Ekran Yansıtma)";
 static const uint32_t kAzamiYuk = 4u * 1024u * 1024u;
-static NSString *const kDoldurAnahtari = @"doldur";
+static NSString *const kAraOlcekAnahtari = @"araOlcek";
 
 #pragma mark - Küçük yardımcılar
 
@@ -708,7 +708,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     NSTimer *_durumZamanlayici;
     int _karesizSaniye;
     BOOL _goruntuGeldi; // açılıştaki bekleyişi kesintiden ayırmak için
-    BOOL _doldur; // varsayılan sığdır; çift dokunma kırparak doldurur
+    BOOL _araOlcek; // varsayılan sığdır; çift dokunma sığdır ile doldur arasındaki ölçeğe geçer
     int _gosterimSaniye; // olağan durumda etiket bu kadar görünür kalır
     int _bildirimSaniye; // çift dokunma bildirimi bitene kadar durum yazısı ezilmez
 }
@@ -718,8 +718,11 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     self.view.backgroundColor = [UIColor blackColor];
 
     _videoKatmani = [[AVSampleBufferDisplayLayer alloc] init];
-    _doldur = [[NSUserDefaults standardUserDefaults] boolForKey:kDoldurAnahtari];
-    _videoKatmani.videoGravity = _doldur ? AVLayerVideoGravityResizeAspectFill : AVLayerVideoGravityResizeAspect;
+    // Eski "doldur" tercihi artık okunmuyor; varsayılan her zaman sığdır.
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"doldur"];
+    _araOlcek = [[NSUserDefaults standardUserDefaults] boolForKey:kAraOlcekAnahtari];
+    _videoKatmani.videoGravity = AVLayerVideoGravityResizeAspect;
+    self.view.clipsToBounds = YES;
     _videoKatmani.backgroundColor = [UIColor blackColor].CGColor;
     _videoKatmani.frame = self.view.bounds;
     _videoKatmani.contentsScale = [UIScreen mainScreen].scale;
@@ -771,28 +774,50 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    _videoKatmani.frame = self.view.bounds;
+    [self olcegiUygula];
 }
 
 #pragma mark Ölçek
 
-// iPhone yatayken 1024x480 (~2,2:1) yollar; 4:3 ekranı doldurmak yanlardan üçte biri
-// kırpar, o yüzden varsayılan sığdırmak. Doldurma yalnız istenince.
+// iPhone yatayken 1024x480 (~2,2:1) yollar; 4:3 ekranda sığdırmak üstte/altta bant,
+// doldurmak yanlardan üçte bir kırpma demek. Ara ölçek ikisinin tam ortası: katman
+// sığdırma oranıyla kalır, çerçevesi büyütülüp ortalanır, taşan kısmı görünüm kırpar.
+static const CGFloat kAraOran = 0.5; // 0 sığdır, 1 doldur
+
+- (CGSize)akisBoyutu {
+    Alici *kaynak = [[EtkinKaynak paylasilan] etkinMi:_airplayAlici.ad] ? _airplayAlici : _replayAlici;
+    CMVideoFormatDescriptionRef bicim = [kaynak kopyaBicim];
+    if (!bicim) return CGSizeZero;
+    CMVideoDimensions boyut = CMVideoFormatDescriptionGetDimensions(bicim);
+    CFRelease(bicim);
+    return CGSizeMake(boyut.width, boyut.height);
+}
+
 - (void)olcegiUygula {
-    NSString *istenen = _doldur ? AVLayerVideoGravityResizeAspectFill : AVLayerVideoGravityResizeAspect;
-    if ([_videoKatmani.videoGravity isEqualToString:istenen]) return;
+    CGRect alan = self.view.bounds;
+    CGRect cerceve = alan;
+    CGSize akis = [self akisBoyutu];
+    if (_araOlcek && akis.width > 0 && akis.height > 0) {
+        CGFloat sigdir = MIN(alan.size.width / akis.width, alan.size.height / akis.height);
+        CGFloat doldur = MAX(alan.size.width / akis.width, alan.size.height / akis.height);
+        CGFloat olcek = sigdir + (doldur - sigdir) * kAraOran;
+        CGSize boy = CGSizeMake(akis.width * olcek, akis.height * olcek);
+        cerceve = CGRectMake(CGRectGetMidX(alan) - boy.width / 2, CGRectGetMidY(alan) - boy.height / 2,
+                             boy.width, boy.height);
+    }
+    if (CGRectEqualToRect(_videoKatmani.frame, cerceve)) return;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    _videoKatmani.videoGravity = istenen;
+    _videoKatmani.frame = cerceve;
     [CATransaction commit];
 }
 
 - (void)olcekKipiniDegistir {
-    _doldur = !_doldur;
-    [[NSUserDefaults standardUserDefaults] setBool:_doldur forKey:kDoldurAnahtari];
+    _araOlcek = !_araOlcek;
+    [[NSUserDefaults standardUserDefaults] setBool:_araOlcek forKey:kAraOlcekAnahtari];
     [self olcegiUygula];
-    [self etiketiGoster:_doldur ? @"Görüntü: ekranı doldur (kenarlar kırpılır) • geri almak için iki kez dokun"
-                                : @"Görüntü: tamamı görünsün • doldurmak için iki kez dokun"];
+    [self etiketiGoster:_araOlcek ? @"Görüntü: ara ölçek (biraz kırpılır, bant incelir) • geri almak için iki kez dokun"
+                                  : @"Görüntü: tamamı görünsün • ara ölçek için iki kez dokun"];
     _bildirimSaniye = 3;
 }
 
@@ -807,6 +832,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 }
 
 - (void)durumuGuncelle {
+    // iPhone döndürülünce akış boyutu değişir; ara ölçek çerçevesi ona göre yenilenir.
+    [self olcegiUygula];
     int32_t replayKare = [_replayAlici kareSayaciniSifirla];
     int32_t replaySes = [_replayAlici sesSayaciniSifirla];
     int32_t airplayKare = [_airplayAlici kareSayaciniSifirla];
