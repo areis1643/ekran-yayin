@@ -34,6 +34,8 @@
 	<true/>
 	<key>MinimumOSVersion</key>
 	<string>9.0</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>iPhone kilitliyken gösterilecek fotoğrafı seçmek için.</string>
 	<key>UIDeviceFamily</key>
 	<array>
 		<integer>2</integer>

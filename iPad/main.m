@@ -697,7 +697,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
 #pragma mark - Görünüm denetleyicisi
 
-@interface GorunumDenetleyicisi : UIViewController
+@interface GorunumDenetleyicisi : UIViewController <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @end
 
 @implementation GorunumDenetleyicisi {
@@ -708,6 +708,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     NSTimer *_durumZamanlayici;
     int _karesizSaniye;
     BOOL _goruntuGeldi; // açılıştaki bekleyişi kesintiden ayırmak için
+    int _goruntusuzSaniye; // yalnız video karesine bakar; kilitte ses paketleri sürer
+    UIImageView *_kilitFotografi; // iPhone kilitliyken son karenin yerine
     UILabel *_olcekEtiketi; // iki parmakla büyütürken ortada görünen yüzde
     CGFloat _yakinlik; // 0 sığdır, 1 doldur; iki parmakla ayarlanır
     CGFloat _kistirmaBaslangici; // kıstırma başladığındaki ekran ölçeği
@@ -736,6 +738,15 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     _durumEtiketi.font = [UIFont systemFontOfSize:12.0];
     _durumEtiketi.backgroundColor = [UIColor clearColor];
     _durumEtiketi.userInteractionEnabled = NO;
+    _kilitFotografi = [[UIImageView alloc] initWithFrame:self.view.bounds];
+    _kilitFotografi.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _kilitFotografi.contentMode = UIViewContentModeScaleAspectFill;
+    _kilitFotografi.clipsToBounds = YES;
+    _kilitFotografi.userInteractionEnabled = NO;
+    _kilitFotografi.hidden = YES;
+    _kilitFotografi.image = [UIImage imageWithContentsOfFile:[self kilitFotografiYolu]];
+    [self.view addSubview:_kilitFotografi];
+
     [self.view addSubview:_durumEtiketi];
 
     _olcekEtiketi = [[UILabel alloc] initWithFrame:CGRectZero];
@@ -748,6 +759,11 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     _olcekEtiketi.userInteractionEnabled = NO;
     _olcekEtiketi.alpha = 0.0;
     [self.view addSubview:_olcekEtiketi];
+
+    UILongPressGestureRecognizer *uzunBasma =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(fotografSec:)];
+    uzunBasma.minimumPressDuration = 1.0;
+    [self.view addGestureRecognizer:uzunBasma];
 
     UIPinchGestureRecognizer *kistirma =
         [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(kistir:)];
@@ -792,6 +808,45 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [self olcegiUygula];
+}
+
+#pragma mark Kilit fotoğrafı
+
+// iPhone kilitlenince AirPlay yansıtması açık kalır ama kare gelmez (26 Eki ölçümü: kilitte
+// 30 sn'de 0 kare, ses paketleri sürüyor). Durdurulmuş videodan ayırt edilemediği için
+// ekran koruyucu gibi: bu kadar saniye kare gelmezse fotoğraf, ilk karede görüntü.
+static const int kKilitSaniyesi = 10;
+
+- (NSString *)kilitFotografiYolu {
+    NSString *kitaplik = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES).firstObject;
+    return [kitaplik stringByAppendingPathComponent:@"arac-kilit-fotografi.jpg"];
+}
+
+- (void)fotografSec:(UILongPressGestureRecognizer *)uzunBasma {
+    if (uzunBasma.state != UIGestureRecognizerStateBegan || self.presentedViewController) return;
+    UIImagePickerController *secici = [[UIImagePickerController alloc] init];
+    secici.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+    secici.delegate = self;
+    secici.modalPresentationStyle = UIModalPresentationPopover;
+    CGPoint nokta = [uzunBasma locationInView:self.view];
+    secici.popoverPresentationController.sourceView = self.view;
+    secici.popoverPresentationController.sourceRect = CGRectMake(nokta.x, nokta.y, 1, 1);
+    [self presentViewController:secici animated:YES completion:nil];
+}
+
+- (void)imagePickerController:(UIImagePickerController *)secici didFinishPickingMediaWithInfo:(NSDictionary *)bilgi {
+    UIImage *fotograf = bilgi[UIImagePickerControllerOriginalImage];
+    if (fotograf) {
+        [UIImageJPEGRepresentation(fotograf, 0.9) writeToFile:[self kilitFotografiYolu] atomically:YES];
+        _kilitFotografi.image = fotograf;
+        [self olcekEtiketiniGoster:@"Kilit fotoğrafı kaydedildi"];
+        [self olcekEtiketiniGizle];
+    }
+    [secici dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)secici {
+    [secici dismissViewControllerAnimated:YES completion:nil];
 }
 
 #pragma mark Ölçek
@@ -905,6 +960,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     // AirPlay'de durağan ekran (duraklatılmış video, fotoğraf) hiç kare yollamaz;
     // yansıtma açık dendikçe bu kesinti değildir.
     BOOL durgunYansitma = airplayEtkin && airplayBagli && yansitma == 1;
+    _goruntusuzSaniye = kare > 0 ? 0 : _goruntusuzSaniye + 1;
+    _kilitFotografi.hidden = !(_kilitFotografi.image && _goruntuGeldi && _goruntusuzSaniye >= kKilitSaniyesi);
     if (kare > 0 || ses > 0 || durgunYansitma) {
         _karesizSaniye = 0;
         if (kare > 0 || ses > 0) _goruntuGeldi = YES;
