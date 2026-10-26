@@ -117,3 +117,15 @@ Sıradaki: 5. adım — `video_process` Annex-B kareleri Araç'ın AVSampleBuffe
 - Ar3is doğruladı (04:3x): Araç yansıtmayla kendiliğinden açılıyor; iPad kilidinden dönüşte
   hızlandırma 10-15 sn'den bir iki ana indi (kalan: Araç'ın soket tamponundaki canlı
   kareler). iPad ekranı arabada hep açık kalacağı için bu kadarı kabul edildi.
+
+## 7. adım (26 Ekim 2026) — video oynarken daemon'un sessiz ölümü
+
+- Belirti: YouTube videosu bir süre oynayınca yansıtma kapanıyor (2x'te daha çabuk), müzikte
+  yok. Ölen Araç değil aracairplay: 13:38'de pid değişti, rapor yok, COKTU yok.
+- Ölçüm (memorystatus GET_PRIORITY_LIST, root): daemon öncelik 0, sınır 5 MB. plist'teki
+  JetsamProperties (18 / 96 MB) iOS 9'da /Library/LaunchDaemons için yok sayılıyor.
+  GOP önbelleği 2-4 MB'a çıkınca (video) ya da bellek baskısında boşta bandındaki daemon
+  ilk öldürülen oluyordu. Gece 03:31/03:35/03:59 yeniden başlamaları da bu.
+- Düzeltme: daemon root başlar, memorystatus_control ile kendine öncelik 15 / 64 MB koyar,
+  sonra mobile'a (501) iner. Günlükte "jetsam oncelik=0 sinir=0 uid=501" = ikisi de başarılı.
+  Cihazda doğrulandı: öncelik 15, sınır 64 MB. Video ile uzun deneme bekliyor.

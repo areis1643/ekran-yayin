@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
+#include <grp.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <time.h>
@@ -95,6 +97,22 @@ static void crashed(int sig) {
     signal(sig,SIG_DFL); raise(sig);
 }
 static void exited(void) { if (!stopping) logline("beklenmeyen exit()"); }
+/* iOS 9 launchd, /Library'deki plist'in JetsamProperties'ini yok sayıyor: daemon
+ * öncelik 0 (boşta bandı) ve 5 MB sınırla kalıyor, video oynarken GOP önbelleği
+ * büyüyünce jetsam rapor bırakmadan öldürüyor. Sınırı root iken kendimiz koyup
+ * ses oturumu için mobile kullanıcısına iniyoruz. */
+typedef struct { int32_t priority; uint64_t user_data; } jetsam_props;
+static int jetsam_rc[2] = {-1, -1};
+static int drop_root(void) {
+    if (getuid() != 0) return 0;
+    jetsam_props p = {15, 0};
+    jetsam_rc[0] = syscall(440, 2, getpid(), 0, &p, sizeof p);      /* SET_PRIORITY_PROPERTIES */
+    jetsam_rc[1] = syscall(440, 6, getpid(), 64, NULL, 0);          /* SET_JETSAM_TASK_LIMIT */
+    if (jetsam_rc[1]) jetsam_rc[1] = syscall(440, 5, getpid(), 64, NULL, 0); /* HIGH_WATER_MARK */
+    if (initgroups("mobile", 501) || setgid(501) || setuid(501)) return -1;
+    setenv("HOME", "/var/mobile", 1); setenv("USER", "mobile", 1); setenv("LOGNAME", "mobile", 1);
+    return 0;
+}
 
 typedef struct { const unsigned char *p; size_t bits, pos; int bad; } bits_t;
 static uint32_t readbits(bits_t *b, unsigned n) {
@@ -489,6 +507,7 @@ int main(int argc,char **argv) {
         else { fprintf(stderr,"Kullanim: %s [-s WxH] [-d]\n",argv[0]);return 2; }
     }
     if (optind!=argc) return 2;
+    if (drop_root()) { fprintf(stderr,"mobile kullanicisina inilemedi: %s\n",strerror(errno));return 1; }
     mkdir("/var/mobile/Library/Logs",0755);
     struct stat st;
     const char *mode=stat("/var/mobile/Library/Logs/arac-airplay.log",&st)==0 && st.st_size>512*1024?"w":"a";
@@ -499,6 +518,7 @@ int main(int argc,char **argv) {
     int fatal[]={SIGSEGV,SIGBUS,SIGABRT,SIGILL,SIGFPE};
     for (size_t i=0;i<sizeof fatal/sizeof *fatal;i++) signal(fatal[i],crashed);
     atexit(exited);
+    logline("jetsam oncelik=%d sinir=%d uid=%d",jetsam_rc[0],jetsam_rc[1],(int)getuid());
     if (ses_baslat()) logline("Yerel ses baslatilamadi; goruntu devam ediyor");
     debug_logs=debug;
     int local_started=0;

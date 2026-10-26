@@ -14,15 +14,7 @@
     <true/>
     <key>StandardErrorPath</key>
     <string>/var/mobile/Library/Logs/arac-airplay.err</string>
-    <!-- Varsayılan daemon bellek sınırı GOP önbelleğine dar geliyor; jetsam sessizce öldürüyordu (tahmin, rapor bırakmadan yeniden başlama). -->
-    <key>JetsamProperties</key>
-    <dict>
-        <key>JetsamPriority</key>
-        <integer>18</integer>
-        <key>JetsamMemoryLimit</key>
-        <integer>96</integer>
-    </dict>
-    <key>UserName</key>
-    <string>mobile</string>
+    <!-- root başlar: iOS 9 burada JetsamProperties'i yok sayıyor (5 MB, öncelik 0 ölçüldü);
+         daemon jetsam sınırını kendisi koyup mobile kullanıcısına iner (aracairplay.c drop_root). -->
 </dict>
 </plist>
