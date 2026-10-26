@@ -21,3 +21,14 @@ aracbaslat_CODESIGN_FLAGS = -Saracbaslat.entitlements
 
 include $(THEOS_MAKE_PATH)/application.mk
 include $(THEOS_MAKE_PATH)/tool.mk
+
+# Yalnız üst düzey çağrıda: alt make'lerde THEOS_CURRENT_INSTANCE doludur.
+ifeq ($(THEOS_CURRENT_INSTANCE),)
+before-stage::
+	$(MAKE) -C $(CURDIR)/../airplay/alici
+
+after-stage::
+	$(ECHO_NOTHING)mkdir -p "$(THEOS_STAGING_DIR)/usr/libexec"$(ECHO_END)
+	$(ECHO_NOTHING)cp "$(CURDIR)/../airplay/build/aracairplay" "$(THEOS_STAGING_DIR)/usr/libexec/aracairplay"$(ECHO_END)
+	$(ECHO_NOTHING)chmod 755 "$(THEOS_STAGING_DIR)/usr/libexec/aracairplay"$(ECHO_END)
+endif

@@ -1,3 +1,4 @@
 #!/bin/sh
 launchctl unload /Library/LaunchDaemons/tr.niladsp.aracbaslat.plist 2>/dev/null
+launchctl unload /Library/LaunchDaemons/tr.niladsp.aracairplay.plist 2>/dev/null
 exit 0

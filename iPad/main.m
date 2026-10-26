@@ -39,9 +39,7 @@ void *memset(void *hedef, int deger, size_t uzunluk) {
 }
 
 // Sunucu bilgileri
-static NSString *const kDurumBekliyor = @"iPhone bekleniyor (172.20.10.1:8889)";
-static const char *kSunucuHost = "172.20.10.1";
-static const int kSunucuPort = 8889;
+static NSString *const kDurumBekliyor = @"iPhone bekleniyor (ReplayKit 8889 / AirPlay Ekran Yansıtma)";
 static const uint32_t kAzamiYuk = 4u * 1024u * 1024u;
 
 #pragma mark - Küçük yardımcılar
@@ -135,13 +133,54 @@ typedef struct {
     size_t adet;
 } PCMHalka;
 
+#pragma mark - Etkin kaynak
+
+// İki kaynak aynı katmana yazdığı için son 'V' alan kaynağı işaretler.
+@interface EtkinKaynak : NSObject
++ (instancetype)paylasilan;
+- (BOOL)etkinMi:(NSString *)ad;
+- (BOOL)etkinYap:(NSString *)ad;
+@end
+
+@implementation EtkinKaynak {
+    NSString *_ad;
+}
+
++ (instancetype)paylasilan {
+    static EtkinKaynak *paylasilan = nil;
+    static dispatch_once_t bir;
+    dispatch_once(&bir, ^{ paylasilan = [[EtkinKaynak alloc] init]; });
+    return paylasilan;
+}
+
+- (BOOL)etkinMi:(NSString *)ad {
+    @synchronized (self) {
+        return _ad != nil && [_ad isEqualToString:ad];
+    }
+}
+
+// Kaynak değiştiyse YES döner.
+- (BOOL)etkinYap:(NSString *)ad {
+    @synchronized (self) {
+        if (_ad != nil && [_ad isEqualToString:ad]) return NO;
+        _ad = [ad copy];
+        return YES;
+    }
+}
+
+@end
+
 #pragma mark - Alıcı
 
 @class Alici;
 
 @interface Alici : NSObject
 @property (nonatomic, strong) AVSampleBufferDisplayLayer *goruntuKatmani;
-- (instancetype)initWithKatman:(AVSampleBufferDisplayLayer *)katman;
+@property (nonatomic, copy, readonly) NSString *ad;
+- (instancetype)initWithKatman:(AVSampleBufferDisplayLayer *)katman
+                          host:(const char *)host
+                          port:(int)port
+                            ad:(NSString *)ad;
 - (void)baslat;
 - (void)durdur;
 - (BOOL)bagliMi;
@@ -165,6 +204,10 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     BOOL _bagli;
     BOOL _bekliyor; // anahtar kare bekleniyor
     int _soket;
+    char *_host;
+    int _port;
+    EtkinKaynak *_secici;
+    BOOL _anahtarSeyrek;
 
     CMVideoFormatDescriptionRef _bicim;
     NSData *_sps;
@@ -180,13 +223,21 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     volatile int32_t _sesSayaci; // tanı: saniyedeki ses paketi
 }
 
-- (instancetype)initWithKatman:(AVSampleBufferDisplayLayer *)katman {
+- (instancetype)initWithKatman:(AVSampleBufferDisplayLayer *)katman
+                          host:(const char *)host
+                          port:(int)port
+                            ad:(NSString *)ad {
     self = [super init];
     if (self) {
         _goruntuKatmani = katman;
         _soket = -1;
         _bekliyor = YES;
         _calisiyor = NO;
+        _host = strdup(host);
+        _port = port;
+        _ad = [ad copy];
+        _secici = [EtkinKaynak paylasilan];
+        _anahtarSeyrek = [ad isEqualToString:@"AirPlay"];
         memset(&_halka, 0, sizeof(_halka));
         pthread_mutex_init(&_halkaKilit, NULL);
     }
@@ -195,6 +246,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
 - (void)dealloc {
     [self durdur];
+    free(_host);
     if (_sesKuyrugu) {
         AudioQueueStop(_sesKuyrugu, true);
         AudioQueueDispose(_sesKuyrugu, true);
@@ -267,7 +319,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 - (void)agDongusu {
     while (_calisiyor) {
         @autoreleasepool {
-            int fd = sunucuyaBaglan(kSunucuHost, kSunucuPort, 2);
+            int fd = sunucuyaBaglan(_host, _port, 2);
             if (fd < 0) {
                 [self setBagli:NO];
                 [NSThread sleepForTimeInterval:1.0];
@@ -338,9 +390,20 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     if (ppsBoyu == 0 || pos + ppsBoyu > n) return;
     NSData *pps = [NSData dataWithBytes:(p + pos) length:ppsBoyu];
 
-    // SPS/PPS değişmediyse biçim tanımını yeniden kurma.
+    // SPS/PPS değişmediyse biçim tanımını yeniden kurma. Son 'V' alan kaynak
+    // yine de katmanın sahibi olur.
+    BOOL ayniParametreler = NO;
     @synchronized (self) {
-        if (_sps && _pps && [_sps isEqualToData:sps] && [_pps isEqualToData:pps]) return;
+        ayniParametreler = (_sps && _pps && [_sps isEqualToData:sps] && [_pps isEqualToData:pps]);
+    }
+    if (ayniParametreler) {
+        if ([_secici etkinYap:_ad]) {
+            [self setBekliyor:YES]; // yeni kaynak: anahtar kare bekle
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self.goruntuKatmani flush];
+            });
+        }
+        return;
     }
 
     const uint8_t *isaretciler[2] = { (const uint8_t *)sps.bytes, (const uint8_t *)pps.bytes };
@@ -349,6 +412,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     OSStatus durum = CMVideoFormatDescriptionCreateFromH264ParameterSets(
         kCFAllocatorDefault, 2, isaretciler, boyutlar, 4, &yeni);
     if (durum != noErr || !yeni) return;
+
+    [_secici etkinYap:_ad];
 
     @synchronized (self) {
         if (_bicim) CFRelease(_bicim);
@@ -375,6 +440,11 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     if (!p || n < 2) return;
     BOOL anahtar = (p[0] != 0);
     if (![self buKareIslenebilir:anahtar]) return;
+
+    __sync_add_and_fetch(&_kareSayaci, 1);
+
+    // Katmanın sahibi son 'V' alan kaynaktır; öbür kaynağın kareleri kuyruğa girmez.
+    if (![_secici etkinMi:_ad]) return;
 
     CMVideoFormatDescriptionRef bicim = [self kopyaBicim];
     if (!bicim) return;
@@ -411,8 +481,6 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
         CFDictionarySetValue(ek, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue);
     }
 
-    __sync_add_and_fetch(&_kareSayaci, 1);
-
     id tasinan = CFBridgingRelease(ornek); // ARC bloğa taşısın
     dispatch_async(dispatch_get_main_queue(), ^{
         AVSampleBufferDisplayLayer *katman = self.goruntuKatmani;
@@ -420,6 +488,10 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
             [katman flush];
             if (!anahtar) {
                 [self setBekliyor:YES]; // sonraki anahtar kareye kadar atla
+                // AirPlay'de sıradaki anahtar kare dakikalarca gelmeyebilir; bağlantıyı
+                // kesince daemon yeniden bağlanışta son IDR'den itibaren kareleri yollar.
+                int fd = _soket;
+                if (_anahtarSeyrek && fd >= 0) shutdown(fd, SHUT_RDWR);
                 return;
             }
         }
@@ -430,7 +502,9 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
         }
         // Kuyruk birikmesin: hazır değilse kareyi at. Atılan kare sonrakilerin
         // referansı olduğu için bir sonraki anahtar kareye kadar bekle.
-        if (!anahtar && !katman.isReadyForMoreMediaData) {
+        // AirPlay anahtar kareyi seyrek yolluyor; orada atmak görüntüyü uzun süre
+        // dondurur, bu yüzden kare kuyruğa yine de girer.
+        if (!anahtar && !_anahtarSeyrek && !katman.isReadyForMoreMediaData) {
             [self setBekliyor:YES];
             return;
         }
@@ -613,7 +687,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 @implementation GorunumDenetleyicisi {
     AVSampleBufferDisplayLayer *_videoKatmani;
     UILabel *_durumEtiketi;
-    Alici *_alici;
+    Alici *_replayAlici;
+    Alici *_airplayAlici;
     NSTimer *_durumZamanlayici;
     int _karesizSaniye;
     BOOL _goruntuGeldi; // açılıştaki bekleyişi kesintiden ayırmak için
@@ -649,8 +724,16 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     [oturum setCategory:AVAudioSessionCategoryPlayback error:&hata];
     [oturum setActive:YES error:&hata];
 
-    _alici = [[Alici alloc] initWithKatman:_videoKatmani];
-    [_alici baslat];
+    _replayAlici = [[Alici alloc] initWithKatman:_videoKatmani
+                                            host:"172.20.10.1"
+                                            port:8889
+                                              ad:@"ReplayKit"];
+    [_replayAlici baslat];
+    _airplayAlici = [[Alici alloc] initWithKatman:_videoKatmani
+                                             host:"127.0.0.1"
+                                             port:7101
+                                               ad:@"AirPlay"];
+    [_airplayAlici baslat];
 
     _durumZamanlayici = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                          target:self
@@ -665,8 +748,16 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 }
 
 - (void)durumuGuncelle {
-    int32_t kare = [_alici kareSayaciniSifirla];
-    int32_t ses = [_alici sesSayaciniSifirla];
+    int32_t replayKare = [_replayAlici kareSayaciniSifirla];
+    int32_t replaySes = [_replayAlici sesSayaciniSifirla];
+    int32_t airplayKare = [_airplayAlici kareSayaciniSifirla];
+    int32_t airplaySes = [_airplayAlici sesSayaciniSifirla];
+    int32_t kare = replayKare + airplayKare;
+    int32_t ses = replaySes + airplaySes;
+    BOOL replayBagli = [_replayAlici bagliMi];
+    BOOL airplayBagli = [_airplayAlici bagliMi];
+    BOOL airplayEtkin = [[EtkinKaynak paylasilan] etkinMi:_airplayAlici.ad];
+
     // Durağan ekranda ReplayKit kare yollamayabilir; kesinti sayılması için ses de susmalı.
     if (kare > 0 || ses > 0) {
         _karesizSaniye = 0;
@@ -677,11 +768,18 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
     if (_goruntuGeldi && _karesizSaniye >= 5) {
         // Arama gibi kesintide bağlantı kalsa da kare gelmeyebilir; kullanıcıya açıkça göster.
-        _durumEtiketi.text = [NSString stringWithFormat:@"görüntü yok (%d sn) • arama bitince kendiliğinden döner, dönmezse iPhone'da yayını yeniden başlat", _karesizSaniye];
+        if (airplayEtkin) {
+            _durumEtiketi.text = [NSString stringWithFormat:@"görüntü yok (%d sn) • iPhone'da Ekran Yansıtma'yı yeniden seç", _karesizSaniye];
+        } else {
+            _durumEtiketi.text = [NSString stringWithFormat:@"görüntü yok (%d sn) • arama bitince kendiliğinden döner, dönmezse iPhone'da yayını yeniden başlat", _karesizSaniye];
+        }
         _durumEtiketi.hidden = NO;
-    } else if ([_alici bagliMi]) {
-        _durumEtiketi.text = [NSString stringWithFormat:@"bağlandı • %d kare/sn • ses %d paket/sn • %@",
-                              kare, ses, [_alici sesDurumu]];
+    } else if ((airplayEtkin && airplayBagli) || replayBagli) {
+        // AirPlay daemon'u hep dinlediği için bağlantısı tek başına yansıtma demek
+        // değil; yansıtma ancak daemon 'V' yollayınca (etkin) sayılır.
+        Alici *kaynak = (airplayEtkin && airplayBagli) ? _airplayAlici : _replayAlici;
+        _durumEtiketi.text = [NSString stringWithFormat:@"%@ • bağlandı • %d kare/sn • ses %d paket/sn • %@",
+                              kaynak.ad, kare, ses, [kaynak sesDurumu]];
     } else {
         _durumEtiketi.text = kDurumBekliyor;
     }
@@ -713,7 +811,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
 - (void)dealloc {
     [_durumZamanlayici invalidate];
-    [_alici durdur];
+    [_replayAlici durdur];
+    [_airplayAlici durdur];
 }
 
 @end
