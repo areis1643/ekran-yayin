@@ -41,7 +41,7 @@ void *memset(void *hedef, int deger, size_t uzunluk) {
 // Sunucu bilgileri
 static NSString *const kDurumBekliyor = @"iPhone bekleniyor (ReplayKit 8889 / AirPlay Ekran Yansıtma)";
 static const uint32_t kAzamiYuk = 4u * 1024u * 1024u;
-static NSString *const kAraOlcekAnahtari = @"araOlcek";
+static NSString *const kYakinlikAnahtari = @"yakinlik";
 
 #pragma mark - Küçük yardımcılar
 
@@ -708,9 +708,10 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     NSTimer *_durumZamanlayici;
     int _karesizSaniye;
     BOOL _goruntuGeldi; // açılıştaki bekleyişi kesintiden ayırmak için
-    BOOL _araOlcek; // varsayılan sığdır; çift dokunma sığdır ile doldur arasındaki ölçeğe geçer
+    UILabel *_olcekEtiketi; // iki parmakla büyütürken ortada görünen yüzde
+    CGFloat _yakinlik; // 0 sığdır, 1 doldur; iki parmakla ayarlanır
+    CGFloat _kistirmaBaslangici; // kıstırma başladığındaki ekran ölçeği
     int _gosterimSaniye; // olağan durumda etiket bu kadar görünür kalır
-    int _bildirimSaniye; // çift dokunma bildirimi bitene kadar durum yazısı ezilmez
 }
 
 - (void)viewDidLoad {
@@ -718,9 +719,10 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     self.view.backgroundColor = [UIColor blackColor];
 
     _videoKatmani = [[AVSampleBufferDisplayLayer alloc] init];
-    // Eski "doldur" tercihi artık okunmuyor; varsayılan her zaman sığdır.
+    // Eski çift dokunma tercihleri artık okunmuyor.
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"doldur"];
-    _araOlcek = [[NSUserDefaults standardUserDefaults] boolForKey:kAraOlcekAnahtari];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"araOlcek"];
+    _yakinlik = [[NSUserDefaults standardUserDefaults] floatForKey:kYakinlikAnahtari];
     _videoKatmani.videoGravity = AVLayerVideoGravityResizeAspect;
     self.view.clipsToBounds = YES;
     _videoKatmani.backgroundColor = [UIColor blackColor].CGColor;
@@ -736,8 +738,23 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     _durumEtiketi.userInteractionEnabled = NO;
     [self.view addSubview:_durumEtiketi];
 
+    _olcekEtiketi = [[UILabel alloc] initWithFrame:CGRectZero];
+    _olcekEtiketi.textColor = [UIColor whiteColor];
+    _olcekEtiketi.font = [UIFont boldSystemFontOfSize:40.0];
+    _olcekEtiketi.textAlignment = NSTextAlignmentCenter;
+    _olcekEtiketi.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.6];
+    _olcekEtiketi.layer.cornerRadius = 16.0;
+    _olcekEtiketi.layer.masksToBounds = YES;
+    _olcekEtiketi.userInteractionEnabled = NO;
+    _olcekEtiketi.alpha = 0.0;
+    [self.view addSubview:_olcekEtiketi];
+
+    UIPinchGestureRecognizer *kistirma =
+        [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(kistir:)];
+    [self.view addGestureRecognizer:kistirma];
+
     UITapGestureRecognizer *ciftDokunma =
-        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(olcekKipiniDegistir)];
+        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(sigdiraDon)];
     ciftDokunma.numberOfTapsRequired = 2;
     [self.view addGestureRecognizer:ciftDokunma];
 
@@ -780,9 +797,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 #pragma mark Ölçek
 
 // iPhone yatayken 1024x480 (~2,2:1) yollar; 4:3 ekranda sığdırmak üstte/altta bant,
-// doldurmak yanlardan üçte bir kırpma demek. Ara ölçek ikisinin tam ortası: katman
+// doldurmak yanlardan üçte bir kırpma demek. Arası iki parmakla elle ayarlanır: katman
 // sığdırma oranıyla kalır, çerçevesi büyütülüp ortalanır, taşan kısmı görünüm kırpar.
-static const CGFloat kAraOran = 0.5; // 0 sığdır, 1 doldur
 
 - (CGSize)akisBoyutu {
     Alici *kaynak = [[EtkinKaynak paylasilan] etkinMi:_airplayAlici.ad] ? _airplayAlici : _replayAlici;
@@ -793,14 +809,24 @@ static const CGFloat kAraOran = 0.5; // 0 sığdır, 1 doldur
     return CGSizeMake(boyut.width, boyut.height);
 }
 
+// Akış yoksa NO döner; varsa sığdırma ve doldurma ölçeklerini verir.
+- (BOOL)sigdir:(CGFloat *)sigdir doldur:(CGFloat *)doldur akis:(CGSize *)akis {
+    CGSize alan = self.view.bounds.size;
+    CGSize boy = [self akisBoyutu];
+    if (boy.width <= 0 || boy.height <= 0) return NO;
+    *sigdir = MIN(alan.width / boy.width, alan.height / boy.height);
+    *doldur = MAX(alan.width / boy.width, alan.height / boy.height);
+    *akis = boy;
+    return YES;
+}
+
 - (void)olcegiUygula {
     CGRect alan = self.view.bounds;
     CGRect cerceve = alan;
-    CGSize akis = [self akisBoyutu];
-    if (_araOlcek && akis.width > 0 && akis.height > 0) {
-        CGFloat sigdir = MIN(alan.size.width / akis.width, alan.size.height / akis.height);
-        CGFloat doldur = MAX(alan.size.width / akis.width, alan.size.height / akis.height);
-        CGFloat olcek = sigdir + (doldur - sigdir) * kAraOran;
+    CGFloat sigdir, doldur;
+    CGSize akis;
+    if (_yakinlik > 0.001 && [self sigdir:&sigdir doldur:&doldur akis:&akis]) {
+        CGFloat olcek = sigdir + (doldur - sigdir) * _yakinlik;
         CGSize boy = CGSizeMake(akis.width * olcek, akis.height * olcek);
         cerceve = CGRectMake(CGRectGetMidX(alan) - boy.width / 2, CGRectGetMidY(alan) - boy.height / 2,
                              boy.width, boy.height);
@@ -812,23 +838,53 @@ static const CGFloat kAraOran = 0.5; // 0 sığdır, 1 doldur
     [CATransaction commit];
 }
 
-- (void)olcekKipiniDegistir {
-    _araOlcek = !_araOlcek;
-    [[NSUserDefaults standardUserDefaults] setBool:_araOlcek forKey:kAraOlcekAnahtari];
+- (void)kistir:(UIPinchGestureRecognizer *)kistirma {
+    CGFloat sigdir, doldur;
+    CGSize akis;
+    if (![self sigdir:&sigdir doldur:&doldur akis:&akis]) {
+        [self olcekEtiketiniGoster:@"görüntü yok"];
+        return;
+    }
+    if (kistirma.state == UIGestureRecognizerStateBegan) {
+        _kistirmaBaslangici = sigdir + (doldur - sigdir) * _yakinlik;
+    }
+    if (doldur - sigdir > 0.001) {
+        CGFloat olcek = _kistirmaBaslangici * kistirma.scale;
+        _yakinlik = MAX(0.0, MIN(1.0, (olcek - sigdir) / (doldur - sigdir)));
+    }
     [self olcegiUygula];
-    [self etiketiGoster:_araOlcek ? @"Görüntü: ara ölçek (biraz kırpılır, bant incelir) • geri almak için iki kez dokun"
-                                  : @"Görüntü: tamamı görünsün • ara ölçek için iki kez dokun"];
-    _bildirimSaniye = 3;
+    [self olcekEtiketiniGoster:[NSString stringWithFormat:@"Yakınlık %%%d", (int)lround(_yakinlik * 100)]];
+    if (kistirma.state == UIGestureRecognizerStateEnded || kistirma.state == UIGestureRecognizerStateCancelled) {
+        [[NSUserDefaults standardUserDefaults] setFloat:_yakinlik forKey:kYakinlikAnahtari];
+        [self olcekEtiketiniGizle];
+    }
 }
 
-- (void)etiketiGoster:(NSString *)metin {
-    _durumEtiketi.text = metin;
-    _durumEtiketi.hidden = NO;
-    _gosterimSaniye = 0;
-    [_durumEtiketi sizeToFit];
-    CGRect cerceve = _durumEtiketi.frame;
-    cerceve.origin = CGPointMake(8, 8);
-    _durumEtiketi.frame = cerceve;
+- (void)sigdiraDon {
+    _yakinlik = 0;
+    [[NSUserDefaults standardUserDefaults] setFloat:0 forKey:kYakinlikAnahtari];
+    [self olcegiUygula];
+    [self olcekEtiketiniGoster:@"Tamamı görünsün"];
+    [self olcekEtiketiniGizle];
+}
+
+- (void)olcekEtiketiniGoster:(NSString *)metin {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(olcekEtiketiniSondur) object:nil];
+    _olcekEtiketi.text = metin;
+    [_olcekEtiketi sizeToFit];
+    CGRect cerceve = CGRectInset(_olcekEtiketi.bounds, -24, -12);
+    cerceve.origin = CGPointMake(CGRectGetMidX(self.view.bounds) - cerceve.size.width / 2,
+                                 CGRectGetMidY(self.view.bounds) - cerceve.size.height / 2);
+    _olcekEtiketi.frame = cerceve;
+    _olcekEtiketi.alpha = 1.0;
+}
+
+- (void)olcekEtiketiniGizle {
+    [self performSelector:@selector(olcekEtiketiniSondur) withObject:nil afterDelay:1.2];
+}
+
+- (void)olcekEtiketiniSondur {
+    [UIView animateWithDuration:0.3 animations:^{ self->_olcekEtiketi.alpha = 0.0; }];
 }
 
 - (void)durumuGuncelle {
@@ -854,11 +910,6 @@ static const CGFloat kAraOran = 0.5; // 0 sığdır, 1 doldur
         if (kare > 0 || ses > 0) _goruntuGeldi = YES;
     } else {
         _karesizSaniye++;
-    }
-
-    if (_bildirimSaniye > 0) {
-        _bildirimSaniye--;
-        return;
     }
 
     if (_goruntuGeldi && airplayEtkin && airplayBagli && yansitma == 0) {
