@@ -149,6 +149,57 @@ static BOOL hotspottaMi(void) {
     return hotspotta;
 }
 
+#pragma mark - Bluetooth hoparlöre kendiliğinden bağlanma
+
+// iOS 9 eşleşmiş hoparlöre kendisi bağlanmıyor (bağlantıyı hoparlör başlatmazsa).
+// BluetoothManager özel çerçevesi; sınıflar çalışma anında alınır, başlık yok.
+@protocol BTYonetici
++ (id)sharedInstance;
+- (BOOL)available;
+- (BOOL)powered;
+- (NSArray *)pairedDevices;
+@end
+
+@protocol BTAygit
+- (NSString *)name;
+- (NSString *)address;
+- (BOOL)connected;
+- (void)connect;
+@end
+
+// Adında bu geçen eşleşmiş aygıt aranır (büyük/küçük harf önemsiz).
+static NSString *const kHoparlorAdi = @"thinkplus";
+static const int kBTDenemeAraligi = 15; // sn; menzilde değilken telsizi meşgul etmesin
+
+static id<BTYonetici> btYonetici;
+static time_t btSonDeneme;
+
+static void btHazirla(void) {
+    dlopen("/System/Library/PrivateFrameworks/BluetoothManager.framework/BluetoothManager", RTLD_LAZY);
+    Class sinif = NSClassFromString(@"BluetoothManager");
+    if (!sinif) {
+        NSLog(@"aracbaslat BluetoothManager yüklenemedi");
+        return;
+    }
+    btYonetici = [(Class<BTYonetici>)sinif sharedInstance];
+}
+
+static id<BTAygit> hoparlor(void) {
+    for (id<BTAygit> aygit in [btYonetici pairedDevices]) {
+        if ([[aygit name] rangeOfString:kHoparlorAdi options:NSCaseInsensitiveSearch].location != NSNotFound) return aygit;
+    }
+    return nil;
+}
+
+static void hoparloreBaglan(void) {
+    if (!btYonetici || ![btYonetici available] || ![btYonetici powered]) return;
+    if (time(NULL) - btSonDeneme < kBTDenemeAraligi) return;
+    id<BTAygit> aygit = hoparlor();
+    if (!aygit || [aygit connected]) return;
+    btSonDeneme = time(NULL);
+    [aygit connect];
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
         void *kitaplik = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
@@ -156,6 +207,19 @@ int main(int argc, char *argv[]) {
         if (!uygulamaAc) NSLog(@"aracbaslat açma API'si yüklenemedi: %s", dlerror());
 
         wifiHazirla();
+        btHazirla();
+
+        // Tanı: "aracbaslat bt" eşleşmiş Bluetooth aygıtlarını yazar ve çıkar.
+        if (argc > 1 && [@(argv[1]) isEqualToString:@"bt"]) {
+            // Yönetici hazır olana dek bildirimleri işlemesi gerekiyor.
+            for (int i = 0; i < 10 && !(btYonetici && [btYonetici available]); i++)
+                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, false);
+            printf("bt hazir=%d acik=%d\n", (int)[btYonetici available], (int)[btYonetici powered]);
+            for (id<BTAygit> aygit in [btYonetici pairedDevices])
+                printf("%s %s %s bagli=%d\n", [[aygit name] rangeOfString:kHoparlorAdi options:NSCaseInsensitiveSearch].location != NSNotFound ? "*" : " ",
+                       [[aygit name] UTF8String], [[aygit address] UTF8String], (int)[aygit connected]);
+            return 0;
+        }
 
         // Tanı: "aracbaslat tara" görünen ağları yazar, hotspot'u işaretler ve çıkar.
         if (argc > 1 && [@(argv[1]) isEqualToString:@"tara"]) {
@@ -184,6 +248,7 @@ int main(int argc, char *argv[]) {
                 }
                 onceHotspotta = hotspotta;
                 if (!hotspotta) hotspotaKatil();
+                hoparloreBaglan();
             }
             // Tarama ve katılma geri çağrıları bu döngüde gelir.
             CFRunLoopRunInMode(kCFRunLoopDefaultMode, 3, false);

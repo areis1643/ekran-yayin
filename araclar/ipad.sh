@@ -19,7 +19,7 @@ else
 fi
 
 "$burada/sps.sh" <<EOF 2>/dev/null | grep -a -v -e '^#< CLIXML' -e '^<Objs'
-\$ProgressPreference='SilentlyContinue'
+\$ProgressPreference='SilentlyContinue'; \$env:PYTHONIOENCODING='utf-8'
 \$f = Start-Process -PassThru -WindowStyle Hidden "$V\\Scripts\\pymobiledevice3.exe" -ArgumentList 'usbmux','forward','--serial','$UDID','2222','22'
 Start-Sleep -Seconds 3
 try { $ic 2>&1 | Out-String } finally { Stop-Process -Id \$f.Id -Force -ErrorAction SilentlyContinue }
