@@ -12,6 +12,8 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>StandardErrorPath</key>
+    <string>/var/mobile/Library/Logs/arac-baslat.err</string>
     <key>UserName</key>
     <string>mobile</string>
 </dict>

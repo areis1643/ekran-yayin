@@ -9,6 +9,126 @@
 
 typedef int (*UygulamaAc)(CFStringRef identifier, Boolean suspended);
 
+#pragma mark - Hotspot'a kendiliğinden bağlanma
+
+// iOS 9 iPhone erişim noktasını kayıtlı ağ olarak bilse de kendiliğinden katılmıyor;
+// Ayarlar > Wi-Fi'den elle seçmek gerekiyordu. Wi-Fi boştayken tarayıp kendimiz katılıyoruz.
+// MobileWiFi özel çerçevesi; başlık yok, imzalar elle bildirildi.
+typedef void *WiFiManagerRef;
+typedef void *WiFiDeviceClientRef;
+typedef void *WiFiNetworkRef;
+typedef void (*TaramaBitti)(WiFiDeviceClientRef aygit, CFArrayRef aglar, int hata, void *baglam);
+typedef void (*KatilmaBitti)(WiFiDeviceClientRef aygit, WiFiNetworkRef ag, CFDictionaryRef bilgi, int hata, void *baglam);
+
+extern WiFiManagerRef WiFiManagerClientCreate(CFAllocatorRef ayirici, int tur);
+extern void WiFiManagerClientScheduleWithRunLoop(WiFiManagerRef yonetici, CFRunLoopRef dongu, CFStringRef kip);
+extern CFArrayRef WiFiManagerClientCopyDevices(WiFiManagerRef yonetici);
+extern CFArrayRef WiFiManagerClientCopyNetworks(WiFiManagerRef yonetici);
+extern WiFiNetworkRef WiFiDeviceClientCopyCurrentNetwork(WiFiDeviceClientRef aygit);
+extern int WiFiDeviceClientScanAsync(WiFiDeviceClientRef aygit, CFDictionaryRef secenek, TaramaBitti geri, void *baglam);
+extern int WiFiDeviceClientAssociateAsync(WiFiDeviceClientRef aygit, WiFiNetworkRef ag, KatilmaBitti geri, void *baglam);
+extern CFStringRef WiFiNetworkGetSSID(WiFiNetworkRef ag);
+
+// Erişim noktasının adı "areis iPhone’u"; büyük/küçük harf, boşluk ve kesme işareti
+// karşılaştırmaya girmez.
+static NSString *const kHotspotAdi = @"areisiphoneu";
+
+static WiFiManagerRef wifiYonetici;
+static WiFiDeviceClientRef wifiAygit;
+static BOOL katiliyor; // tarama ya da katılma sürerken yenisi başlamaz
+static time_t islemBasi;
+
+static BOOL hotspotAdiMi(WiFiNetworkRef ag) {
+    CFStringRef ssid = ag ? WiFiNetworkGetSSID(ag) : NULL;
+    if (!ssid) return NO;
+    NSMutableString *sade = [NSMutableString string];
+    NSString *ad = [(__bridge NSString *)ssid lowercaseString];
+    for (NSUInteger i = 0; i < ad.length; i++) {
+        unichar c = [ad characterAtIndex:i];
+        if ([[NSCharacterSet alphanumericCharacterSet] characterIsMember:c]) [sade appendFormat:@"%C", c];
+    }
+    return [sade isEqualToString:kHotspotAdi];
+}
+
+static void katilmaBitti(WiFiDeviceClientRef aygit, WiFiNetworkRef ag, CFDictionaryRef bilgi, int hata, void *baglam) {
+    NSLog(@"aracbaslat hotspot'a katılma sonucu: %d", hata);
+    katiliyor = NO;
+}
+
+static void taramaBitti(WiFiDeviceClientRef aygit, CFArrayRef aglar, int hata, void *baglam) {
+    WiFiNetworkRef bulunan = NULL;
+    for (CFIndex i = 0; aglar && i < CFArrayGetCount(aglar); i++) {
+        WiFiNetworkRef ag = (WiFiNetworkRef)CFArrayGetValueAtIndex(aglar, i);
+        if (hotspotAdiMi(ag)) { bulunan = ag; break; }
+    }
+    if (!bulunan) {
+        katiliyor = NO;
+        return;
+    }
+    NSLog(@"aracbaslat hotspot görüldü, katılınıyor");
+    int sonuc = WiFiDeviceClientAssociateAsync(aygit, bulunan, katilmaBitti, NULL);
+    if (sonuc != 0) {
+        NSLog(@"aracbaslat katılma başlatılamadı: %d", sonuc);
+        katiliyor = NO;
+    }
+}
+
+static void taniTaramasi(WiFiDeviceClientRef aygit, CFArrayRef aglar, int hata, void *baglam) {
+    printf("tarama hata=%d, %ld ağ\n", hata, aglar ? (long)CFArrayGetCount(aglar) : 0L);
+    for (CFIndex i = 0; aglar && i < CFArrayGetCount(aglar); i++) {
+        WiFiNetworkRef ag = (WiFiNetworkRef)CFArrayGetValueAtIndex(aglar, i);
+        CFStringRef ssid = WiFiNetworkGetSSID(ag);
+        printf("%s %s\n", hotspotAdiMi(ag) ? "*" : " ", ssid ? [(__bridge NSString *)ssid UTF8String] : "?");
+    }
+    CFArrayRef kayitli = WiFiManagerClientCopyNetworks(wifiYonetici);
+    for (CFIndex i = 0; kayitli && i < CFArrayGetCount(kayitli); i++) {
+        WiFiNetworkRef ag = (WiFiNetworkRef)CFArrayGetValueAtIndex(kayitli, i);
+        CFStringRef kssid = WiFiNetworkGetSSID(ag);
+        printf("kayıtlı %s %s\n", hotspotAdiMi(ag) ? "*" : " ", kssid ? [(__bridge NSString *)kssid UTF8String] : "?");
+    }
+    if (kayitli) CFRelease(kayitli);
+    WiFiNetworkRef simdiki = WiFiDeviceClientCopyCurrentNetwork(aygit);
+    CFStringRef ssid = simdiki ? WiFiNetworkGetSSID(simdiki) : NULL;
+    printf("şu an bağlı: %s\n", ssid ? [(__bridge NSString *)ssid UTF8String] : "yok");
+    if (simdiki) CFRelease(simdiki);
+    fflush(stdout);
+    CFRunLoopStop(CFRunLoopGetCurrent());
+}
+
+static void wifiHazirla(void) {
+    wifiYonetici = WiFiManagerClientCreate(kCFAllocatorDefault, 0);
+    if (!wifiYonetici) {
+        NSLog(@"aracbaslat Wi-Fi yöneticisi açılamadı");
+        return;
+    }
+    WiFiManagerClientScheduleWithRunLoop(wifiYonetici, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    CFArrayRef aygitlar = WiFiManagerClientCopyDevices(wifiYonetici);
+    if (aygitlar && CFArrayGetCount(aygitlar) > 0) {
+        wifiAygit = (WiFiDeviceClientRef)CFRetain(CFArrayGetValueAtIndex(aygitlar, 0));
+    } else {
+        NSLog(@"aracbaslat Wi-Fi aygıtı bulunamadı");
+    }
+    if (aygitlar) CFRelease(aygitlar);
+}
+
+// Wi-Fi hiçbir ağa bağlı değilse (evdeki ağa dokunmaz) erişim noktasını arar.
+static void hotspotaKatil(void) {
+    if (!wifiAygit) return;
+    if (katiliyor) {
+        if (time(NULL) - islemBasi < 30) return;
+        NSLog(@"aracbaslat tarama/katılma yanıt vermedi, yeniden deneniyor");
+    }
+    WiFiNetworkRef simdiki = WiFiDeviceClientCopyCurrentNetwork(wifiAygit);
+    if (simdiki) {
+        CFRelease(simdiki);
+        return;
+    }
+    katiliyor = YES;
+    islemBasi = time(NULL);
+    int sonuc = WiFiDeviceClientScanAsync(wifiAygit, (__bridge CFDictionaryRef)@{}, taramaBitti, NULL);
+    if (sonuc != 0) katiliyor = NO; // Wi-Fi kapalıyken tarama reddedilir; sessizce bekle
+}
+
 static BOOL hotspottaMi(void) {
     struct ifaddrs *arayuzler = NULL;
     if (getifaddrs(&arayuzler) != 0) return NO;
@@ -35,6 +155,16 @@ int main(int argc, char *argv[]) {
         UygulamaAc uygulamaAc = kitaplik ? (UygulamaAc)dlsym(kitaplik, "SBSLaunchApplicationWithIdentifier") : NULL;
         if (!uygulamaAc) NSLog(@"aracbaslat açma API'si yüklenemedi: %s", dlerror());
 
+        wifiHazirla();
+
+        // Tanı: "aracbaslat tara" görünen ağları yazar, hotspot'u işaretler ve çıkar.
+        if (argc > 1 && [@(argv[1]) isEqualToString:@"tara"]) {
+            if (!wifiAygit) return 1;
+            WiFiDeviceClientScanAsync(wifiAygit, (__bridge CFDictionaryRef)@{}, taniTaramasi, NULL);
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 20, false);
+            return 0;
+        }
+
         BOOL onceHotspotta = NO;
         int kalanDeneme = 0;
         while (YES) {
@@ -53,8 +183,10 @@ int main(int argc, char *argv[]) {
                     else if (kalanDeneme == 0) NSLog(@"aracbaslat deneme sınırına ulaşıldı");
                 }
                 onceHotspotta = hotspotta;
+                if (!hotspotta) hotspotaKatil();
             }
-            sleep(3);
+            // Tarama ve katılma geri çağrıları bu döngüde gelir.
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 3, false);
         }
     }
 }
