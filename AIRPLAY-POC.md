@@ -144,3 +144,10 @@ Sıradaki: 5. adım — `video_process` Annex-B kareleri Araç'ın AVSampleBuffe
   geç kalan atılır, erken gelen bekletilir. Yalnız ses (müzik) oturumu eskisi gibi hemen çalar.
 - Ölçüm günlükte: "son 30 sn senkron: ..." satırı ve "ses cikisi: ..." (rota + gecikme).
   Cihazda henüz denenmedi.
+- 27 Ekim günlüğü (yedek iPad'de `/var/mobile/arac-airplay-yedek-1028.log`): 19:50 oturumunda
+  Araç açılamadı (SBS sonucu 3), Araç 3 dk sonra bağlandı ve 1688 karelik (5 MB) GOP yeniden
+  oynatıldı; tek GOP 13 dk'da 16 MB sınırına yaklaştı (iPhone IDR'yi çok seyrek yolluyor).
+  19:55-19:58 arası 3646 kez "raop_rtp resend failed: 55" (ENOBUFS). Düzeltme: yansıtma
+  sürerken Araç bağlı değilse daemon 5 sn'de bir yeniden açmayı dener.
+- 28 Ekim 12:35 kuruldu; daemon ayağa kalktı (iPad hoparlörü, çıkış gecikmesi 25 ms). Yansıtma
+  ile deneme hotspot'ta bekliyor.

@@ -33,6 +33,10 @@ static uint64_t frames, skipped, keyframes;
 static int client = -1, listener = -1, waiting_idr = 1, debug_logs;
 /* Araç'a 'K' ile bildirilir: durağan ekranda kare gelmemesi kesinti sayılmasın. */
 static volatile int mirroring;
+/* Yansıtma başlarken iPad kilitliyse açma reddediliyor (27 Eki 19:50: sonuç 3, Araç ancak
+ * 3 dk sonra elle açıldı, 1688 karelik GOP'u çözmek görüntüyü sesin gerisine attı).
+ * Araç bağlanana dek birkaç saniyede bir yeniden denenir. */
+static volatile time_t son_acma;
 static pthread_t accept_thread;
 static unsigned char *cached_sps, *cached_pps, *cached_v;
 static size_t cached_sps_len, cached_pps_len, cached_v_len;
@@ -538,7 +542,7 @@ static void format(void *c,unsigned char *ct,unsigned short *spf,bool *screen,bo
 }
 static void running(void *c,bool b) {
     (void)c; mirroring=b; logline("mirror %s",b?"başladı":"bitti");
-    if (b) logline("Araç acma is parcacigi: %d",uygulama_ac());
+    if (b) { son_acma=time(NULL); logline("Araç acma is parcacigi: %d",uygulama_ac()); }
 }
 static void admit(void *c,char *id,char *model,char *name,bool *ok) { (void)c;*ok=true;logline("iPhone bağlandı id=%s model=%s name=%s",id?id:"",model?model:"",name?name:""); }
 static void pin(void *c,char *p) { (void)c;(void)p; }
@@ -611,6 +615,10 @@ int main(int argc,char **argv) {
     time_t summary=time(NULL), azaltma=summary;
     while (!stopping) {
         time_t now=time(NULL);
+        if (mirroring && now-son_acma>=5) {
+            pthread_mutex_lock(&videolock); int bagli=client>=0; pthread_mutex_unlock(&videolock);
+            if (!bagli) { son_acma=now; uygulama_ac(); }
+        }
         if (now-azaltma>=2) { pthread_mutex_lock(&videolock); gecikme_azalt(); pthread_mutex_unlock(&videolock); azaltma=now; }
         if(now-summary>=30) {
             pthread_mutex_lock(&videolock);
