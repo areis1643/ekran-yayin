@@ -19,6 +19,7 @@
 #import <pthread.h>
 #import <string.h>
 #import <sys/socket.h>
+#import <sys/time.h>
 #import <unistd.h>
 
 // Bu SDK'nın .tbd dosyalarında memcpy/memset dışa aktarımı yok. Kendi sürümlerimizi
@@ -51,6 +52,15 @@ static uint16_t oku16be(const uint8_t *p) {
 
 static uint32_t oku32be(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+// AirPlay daemon'u karelere sesle aynı saatten (gettimeofday; iOS 9'da clock_gettime
+// yok, UxPlay'in CLOCK_REALTIME'ı da buna çıkıyor) gösterim zamanı koyar; katmanın
+// zaman tabanı bu saati izler.
+static CMTime gercekZaman(void) {
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    return CMTimeMake((int64_t)t.tv_sec * 1000000000 + (int64_t)t.tv_usec * 1000, 1000000000);
 }
 
 // Zaman aşımı (SO_RCVTIMEO) devreye girerse NO döner.
@@ -451,9 +461,18 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 - (void)videoKaresi:(const uint8_t *)p uzunluk:(size_t)n {
     if (!p || n < 2) return;
     // Bayrak baytı: bit 0 anahtar kare, bit 1 "gösterme" (AirPlay daemon'u geç
-    // bağlanışta son IDR'den bu yana kareleri yalnız çözücüyü güncellemek için yollar).
+    // bağlanışta son IDR'den bu yana kareleri yalnız çözücüyü güncellemek için yollar),
+    // bit 2 ardından 8 bayt gösterim zamanı (ns, sesle aynı saat).
     BOOL anahtar = (p[0] & 1) != 0;
     BOOL gosterme = (p[0] & 2) != 0;
+    BOOL zamanli = (p[0] & 4) != 0;
+    size_t basBoyu = 1;
+    CMSampleTimingInfo zaman = { kCMTimeInvalid, kCMTimeInvalid, kCMTimeInvalid };
+    if (zamanli) {
+        if (n < 10) return;
+        zaman.presentationTimeStamp = CMTimeMake((int64_t)(((uint64_t)oku32be(p + 1) << 32) | oku32be(p + 5)), 1000000000);
+        basBoyu = 9;
+    }
     if (![self buKareIslenebilir:anahtar]) return;
 
     __sync_add_and_fetch(&_kareSayaci, 1);
@@ -464,7 +483,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     CMVideoFormatDescriptionRef bicim = [self kopyaBicim];
     if (!bicim) return;
 
-    size_t veriBoyu = n - 1;
+    size_t veriBoyu = n - basBoyu;
     CMBlockBufferRef blok = NULL;
     OSStatus durum = CMBlockBufferCreateWithMemoryBlock(
         kCFAllocatorDefault, NULL, veriBoyu, kCFAllocatorDefault, NULL,
@@ -473,7 +492,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
         CFRelease(bicim);
         return;
     }
-    durum = CMBlockBufferReplaceDataBytes(p + 1, blok, 0, veriBoyu);
+    durum = CMBlockBufferReplaceDataBytes(p + basBoyu, blok, 0, veriBoyu);
     if (durum != noErr) {
         CFRelease(blok);
         CFRelease(bicim);
@@ -483,7 +502,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     CMSampleBufferRef ornek = NULL;
     size_t ornekBoyu = veriBoyu;
     durum = CMSampleBufferCreate(kCFAllocatorDefault, blok, true, NULL, NULL,
-                                 bicim, 1, 0, NULL, 1, &ornekBoyu, &ornek);
+                                 bicim, 1, zamanli ? 1 : 0, zamanli ? &zaman : NULL, 1, &ornekBoyu, &ornek);
     CFRelease(blok);
     CFRelease(bicim);
     if (durum != noErr || !ornek) return;
@@ -493,7 +512,8 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     CFArrayRef ekler = CMSampleBufferGetSampleAttachmentsArray(ornek, true);
     if (ekler && CFArrayGetCount(ekler) > 0) {
         CFMutableDictionaryRef ek = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(ekler, 0);
-        CFDictionarySetValue(ek, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue);
+        // Zamanlı kare sesle birlikte gösterilsin; geç kalan zaten hemen çıkar.
+        if (!zamanli) CFDictionarySetValue(ek, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue);
         if (gosterme) CFDictionarySetValue(ek, kCMSampleAttachmentKey_DoNotDisplay, kCFBooleanTrue);
     }
 
@@ -731,6 +751,13 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     _videoKatmani.frame = self.view.bounds;
     _videoKatmani.contentsScale = [UIScreen mainScreen].scale;
     [self.view.layer addSublayer:_videoKatmani];
+    CMTimebaseRef zamanTabani = NULL;
+    if (CMTimebaseCreateWithMasterClock(kCFAllocatorDefault, CMClockGetHostTimeClock(), &zamanTabani) == noErr) {
+        CMTimebaseSetTime(zamanTabani, gercekZaman());
+        CMTimebaseSetRate(zamanTabani, 1.0);
+        _videoKatmani.controlTimebase = zamanTabani;
+        CFRelease(zamanTabani);
+    }
 
     _durumEtiketi = [[UILabel alloc] initWithFrame:CGRectMake(8, 8, 360, 20)];
     _durumEtiketi.text = kDurumBekliyor;
@@ -945,6 +972,12 @@ static const int kKilitSaniyesi = 10;
 - (void)durumuGuncelle {
     // iPhone döndürülünce akış boyutu değişir; ara ölçek çerçevesi ona göre yenilenir.
     [self olcegiUygula];
+    // Zaman tabanı makine saatiyle ilerler; gerçek saat ayarlanırsa (NTP) yeniden hizala.
+    CMTimebaseRef zamanTabani = _videoKatmani.controlTimebase;
+    if (zamanTabani) {
+        CMTime fark = CMTimeSubtract(gercekZaman(), CMTimebaseGetTime(zamanTabani));
+        if (fabs(CMTimeGetSeconds(fark)) > 0.005) CMTimebaseSetTime(zamanTabani, gercekZaman());
+    }
     int32_t replayKare = [_replayAlici kareSayaciniSifirla];
     int32_t replaySes = [_replayAlici sesSayaciniSifirla];
     int32_t airplayKare = [_airplayAlici kareSayaciniSifirla];

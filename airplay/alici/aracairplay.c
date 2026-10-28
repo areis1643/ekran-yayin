@@ -41,6 +41,43 @@ static int warned_hevc;
 static unsigned char *cached_gop;
 static size_t cached_gop_len, cached_gop_capacity, cached_gop_frames;
 static struct timeval last_sent;
+/* Dudak senkronu: UxPlay her kareye ve ses paketine yerel saatle (CLOCK_REALTIME ns)
+ * bir zaman veriyor. Kare de ses de bu zamana aynı oynatma gecikmesi eklenerek
+ * gösterilir/duyulur. Gecikme, geç gelen paketin, Araç'ın çözme payının ve hoparlör
+ * (Bluetooth) gecikmesinin en kötüsüne göre kendiliğinden ayarlanır. Eskiden ikisi de
+ * geldiği an oynatılıyordu: Bluetooth gecikmesi ve çözücüde biriken kareler sesi
+ * görüntüden kaydırıyordu. */
+#define MS 1000000LL
+#define GECIKME_EN_AZ (80*MS)
+#define GECIKME_EN_COK (800*MS)
+#define CIZIM_PAYI (60*MS)   /* Araç'a iletim + donanım çözme */
+#define SES_PAYI (30*MS)
+static int64_t gecikme=GECIKME_EN_AZ, pencere_en_cok;
+static int64_t gec_v_top, gec_v_en, gec_a_top, gec_a_en;
+static uint64_t gec_v_n, gec_a_n, zamansiz_v, zamansiz_a;
+static int64_t simdi_ns(void) {
+    struct timespec t; clock_gettime(CLOCK_REALTIME,&t);
+    return (int64_t)t.tv_sec*1000000000+t.tv_nsec;
+}
+/* videolock altında. Gereken gecikme sığıyorsa oynatma zamanını, sığmıyorsa 0 (hemen) verir. */
+static uint64_t oynatma_zamani(uint64_t zaman, int64_t pay, int64_t *top, int64_t *en, uint64_t *n, uint64_t *zamansiz) {
+    if (!zaman) { (*zamansiz)++; return 0; }
+    int64_t gec=simdi_ns()-(int64_t)zaman;
+    if (gec<-2000*MS || gec>2000*MS) { (*zamansiz)++; return 0; }
+    *top+=gec; (*n)++; if (*n==1 || gec>*en) *en=gec;
+    int64_t gereken=gec+pay;
+    if (gereken>pencere_en_cok) pencere_en_cok=gereken;
+    if (gereken>gecikme) gecikme=gereken+10*MS<GECIKME_EN_COK ? gereken+10*MS : GECIKME_EN_COK;
+    if (gereken>gecikme) { (*zamansiz)++; return 0; }
+    return zaman+(uint64_t)gecikme;
+}
+/* Ani bir takılma gecikmeyi büyütür; sonra 2 sn'de bir 10 ms yavaşça geri iner. */
+static void gecikme_azalt(void) {
+    int64_t hedef=pencere_en_cok+10*MS;
+    if (hedef<GECIKME_EN_AZ) hedef=GECIKME_EN_AZ;
+    if (gecikme>hedef+30*MS) gecikme-=10*MS;
+    pencere_en_cok=0;
+}
 
 void logline(const char *fmt, ...);
 static void clear_gop(void) {
@@ -182,6 +219,7 @@ static void put32(unsigned char *p, size_t n) {
     p[0]=(unsigned char)(n>>24); p[1]=(unsigned char)(n>>16);
     p[2]=(unsigned char)(n>>8); p[3]=(unsigned char)n;
 }
+static void put64(unsigned char *p, uint64_t n) { put32(p,(size_t)(n>>32)); put32(p+4,(size_t)(n&0xffffffffU)); }
 static void disconnect_client(void) {
     if (client >= 0) { shutdown(client,SHUT_RDWR); close(client); client=-1; logline("Araç koptu"); }
     waiting_idr=1;
@@ -265,11 +303,15 @@ static void video(void *c, raop_ntp_t *ntp, video_decode_struct *d) {
         }
     }
     if (payload==1) goto out;
+    /* Bayrak bit 2: ardından 8 bayt gösterim zamanı (CLOCK_REALTIME ns). */
+    uint64_t goster=oynatma_zamani(d->ntp_time_local,CIZIM_PAYI,&gec_v_top,&gec_v_en,&gec_v_n,&zamansiz_v);
+    if (goster) payload+=8;
     if (!cached_v || payload>UINT32_MAX) { clear_gop(); skipped++; goto out; }
     unsigned char *packet=malloc(payload+5);
     if (!packet) { clear_gop(); skipped++; goto out; }
-    packet[0]='F'; put32(packet+1,payload); packet[5]=key;
+    packet[0]='F'; put32(packet+1,payload); packet[5]=key|(goster?4:0);
     pos=0; size_t off=6;
+    if (goster) { put64(packet+off,goster); off+=8; }
     while (next_nal(d->data,n,&pos,&nal,&len)) {
         if (!len || (nal[0]&31)==7 || (nal[0]&31)==8 || (nal[0]&31)==9) continue;
         put32(packet+off,len); off+=4; memcpy(packet+off,nal,len); off+=len;
@@ -325,7 +367,7 @@ static void *accept_loop(void *unused) {
             int sent=client>=0 ? send_packet(cached_gop,cached_gop_len) : -1;
             for (size_t off=0; off+6<=cached_gop_len;) {
                 size_t n=((size_t)cached_gop[off+1]<<24)|((size_t)cached_gop[off+2]<<16)|((size_t)cached_gop[off+3]<<8)|cached_gop[off+4];
-                cached_gop[off+5]&=1;
+                cached_gop[off+5]&=(unsigned char)~2;
                 off+=5+n;
             }
             if (sent==0) {
@@ -471,7 +513,9 @@ static void audio(void *c, raop_ntp_t *n, audio_decode_struct *d) {
             audio_decoded++;
             size_t bytes=output.mBuffers[0].mDataByteSize;
             if (bytes>sizeof pcm) goto end;
-            ses_yaz(pcm,bytes/4);
+            /* Yalnız ses (müzik) oturumunda görüntü yok: geldiği an çalınır. */
+            uint64_t zaman=mirroring ? oynatma_zamani(d->ntp_time_local,ses_cikis_gecikmesi()+SES_PAYI,&gec_a_top,&gec_a_en,&gec_a_n,&zamansiz_a) : 0;
+            ses_yaz(pcm,bytes/4,zaman);
         }
         break;
     }
@@ -564,13 +608,21 @@ int main(int argc,char **argv) {
     if (error) { logline("AirPlay Bonjour error=%d",error);goto done; } airplay_registered=1;
     logline("Araç Ekran hazir port=%u ilan=%dx%d maxFPS=30 refreshRate=30 features=0x%016"PRIx64" HLS=0 MultiCodec=0",port,w,h,dnssd_get_airplay_features(dns));
     result=0;
-    time_t summary=time(NULL);
+    time_t summary=time(NULL), azaltma=summary;
     while (!stopping) {
         time_t now=time(NULL);
+        if (now-azaltma>=2) { pthread_mutex_lock(&videolock); gecikme_azalt(); pthread_mutex_unlock(&videolock); azaltma=now; }
         if(now-summary>=30) {
             pthread_mutex_lock(&videolock);
             logline("son 30 sn: %"PRIu64" kare, %"PRIu64" anahtar, %"PRIu64" atlanan, önbellek %zu kare/%zu bayt",frames,keyframes,skipped,cached_gop_frames,cached_gop_len);
             logline("son 30 sn ses: paket=%"PRIu64" cozulen=%"PRIu64" hata=%"PRIu64,audio_packets,audio_decoded,audio_errors);
+            uint64_t atilan,beklenen; ses_sayaclar(&atilan,&beklenen);
+            if (gec_v_n || gec_a_n || zamansiz_v || zamansiz_a)
+                logline("son 30 sn senkron: oynatma gecikmesi %"PRId64" ms; kare gelis gecikmesi ort %"PRId64"/en %"PRId64" ms, zamansiz %"PRIu64"; ses ort %"PRId64"/en %"PRId64" ms, zamansiz %"PRIu64"; hoparlor %"PRId64" ms; ses gec atilan %"PRIu64" ms, erken bekletilen %"PRIu64" ms",
+                    gecikme/MS, gec_v_n?gec_v_top/(int64_t)gec_v_n/MS:0, gec_v_en/MS, zamansiz_v,
+                    gec_a_n?gec_a_top/(int64_t)gec_a_n/MS:0, gec_a_en/MS, zamansiz_a,
+                    ses_cikis_gecikmesi()/MS, atilan*1000/44100, beklenen*1000/44100);
+            gec_v_top=gec_v_en=gec_a_top=gec_a_en=0; gec_v_n=gec_a_n=zamansiz_v=zamansiz_a=0;
             audio_packets=audio_decoded=audio_errors=0;
             frames=skipped=keyframes=0; pthread_mutex_unlock(&videolock); summary=now;
         }

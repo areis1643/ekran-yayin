@@ -129,3 +129,18 @@ Sıradaki: 5. adım — `video_process` Annex-B kareleri Araç'ın AVSampleBuffe
 - Düzeltme: daemon root başlar, memorystatus_control ile kendine öncelik 15 / 64 MB koyar,
   sonra mobile'a (501) iner. Günlükte "jetsam oncelik=0 sinir=0 uid=501" = ikisi de başarılı.
   Cihazda doğrulandı: öncelik 15, sınır 64 MB. Video ile uzun deneme bekliyor.
+
+## 8. adım (28 Ekim 2026) — zaman damgalı ses-görüntü senkronu
+
+- Belirti (27 Ekim, arabada): 2x videoda ses ile görüntü senkronu "zorlanıyor".
+- Kodda bulunan: UxPlay'in verdiği `ntp_time_local` hiç kullanılmıyordu. Kare geldiği an
+  (DisplayImmediately) gösteriliyor, ses geldiği an çalınıyordu. Bluetooth hoparlör (thinkplus,
+  26 Ekim akşamından beri kendiliğinden bağlanıyor) sese ~150-250 ms ekler, bu telafi edilmiyordu;
+  AirPlay karesi hiç atılmadığı için çözücü yetişemezse görüntü gecikmesi birikiyordu.
+- Düzeltme: daemon kareye ve sese aynı oynatma gecikmesini ekler (gelişteki gecikme + Araç payı
+  60 ms / hoparlör outputLatency + 30 ms; en az 80, en çok 800 ms; artışı anında, inişi 2 sn'de
+  10 ms). 'F' bayrağında bit 2 = ardından 8 bayt gösterim zamanı (gettimeofday ns); Araç
+  katmanına bu saati izleyen controlTimebase verildi. Ses RemoteIO'da duyulma zamanına göre
+  geç kalan atılır, erken gelen bekletilir. Yalnız ses (müzik) oturumu eskisi gibi hemen çalar.
+- Ölçüm günlükte: "son 30 sn senkron: ..." satırı ve "ses cikisi: ..." (rota + gecikme).
+  Cihazda henüz denenmedi.
