@@ -7,6 +7,8 @@ $pmd = "$v\Scripts\pymobiledevice3.exe"
 # Slayer evde ve klinikte farklı ağda; telefon hangi ağdaysa Slayer'ın o anki ağı taranır.
 $ip = (Get-NetIPAddress -AddressFamily IPv4 | ? { $_.PrefixOrigin -eq 'Dhcp' -and $_.InterfaceAlias -notmatch 'Tailscale|vEthernet' } | Select-Object -First 1).IPAddress
 $ag = ($ip -replace '\.\d+$', '.0') + '/24'
+# Modemlerde telefona ayrılan adres (ev: ZXHN H168A, klinik: H3600); yoksa yalnız ağ taranır.
+$sabit = @{ '192.168.100.0/24' = '192.168.100.11'; '192.168.1.0/24' = '192.168.1.104' }[$ag]
 
 # Apple Devices usbmux'u kendiliğinden açılmıyor; dinlemiyorsa paketin içinden başlat.
 if (-not (Get-NetTCPConnection -LocalPort 27015 -State Listen -ErrorAction SilentlyContinue)) {
@@ -32,7 +34,7 @@ if ($usb) {
 }
 
 # Wi-Fi: telefonun IP'si DHCP ile değişiyor, wifi-kur.py ağı tarayıp bulur.
-$o = (& "$v\Scripts\python.exe" "$v\wifi-kur.py" $ag "$v\Ekran2-signed.ipa" 2>&1 | Out-String).Trim()
+$o = (& "$v\Scripts\python.exe" "$v\wifi-kur.py" $sabit $ag "$v\Ekran2-signed.ipa" 2>&1 | Out-String).Trim()
 $son = ($o -split "`n")[-1].Trim()
 if ($son -eq 'KURULDU') { 'KURULDU' }
 elseif ($son -match 'telefon bulunamad') { 'YOK' }
