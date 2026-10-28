@@ -7,8 +7,8 @@ $pmd = "$v\Scripts\pymobiledevice3.exe"
 # Slayer evde ve klinikte farklı ağda; telefon hangi ağdaysa Slayer'ın o anki ağı taranır.
 $ip = (Get-NetIPAddress -AddressFamily IPv4 | ? { $_.PrefixOrigin -eq 'Dhcp' -and $_.InterfaceAlias -notmatch 'Tailscale|vEthernet' } | Select-Object -First 1).IPAddress
 $ag = ($ip -replace '\.\d+$', '.0') + '/24'
-# Modemlerde telefona ayrılan adres (ev: ZXHN H168A; klinik: H3600, .104 = 5 GHz, .105 = 2.4 GHz); yoksa yalnız ağ taranır.
-$sabit = @{ '192.168.100.0/24' = '192.168.100.11'; '192.168.1.0/24' = @('192.168.1.104', '192.168.1.105') }[$ag]
+# Modemlerde telefona ayrılan adres (ev: ZXHN H168A, .11 = 5 GHz, .15 = Xiaomi genişletici, .16 = 2.4 GHz; klinik: H3600, .104 = 5 GHz, .105 = 2.4 GHz); yoksa yalnız ağ taranır.
+$sabit = @{ '192.168.100.0/24' = @('192.168.100.11', '192.168.100.15', '192.168.100.16'); '192.168.1.0/24' = @('192.168.1.104', '192.168.1.105') }[$ag]
 
 # Apple Devices usbmux'u kendiliğinden açılmıyor; dinlemiyorsa paketin içinden başlat.
 if (-not (Get-NetTCPConnection -LocalPort 27015 -State Listen -ErrorAction SilentlyContinue)) {
