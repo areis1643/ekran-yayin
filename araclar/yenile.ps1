@@ -4,7 +4,9 @@
 $ProgressPreference = 'SilentlyContinue'; $env:RUST_LOG = 'warn'; $env:PYTHONIOENCODING = 'utf-8'
 $v = 'C:\Users\AliR\ipad-araclar'; $ph = '00008110-001C0C621A0A401E'
 $pmd = "$v\Scripts\pymobiledevice3.exe"
-$ag = '192.168.100.0/24'
+# Slayer evde ve klinikte farklı ağda; telefon hangi ağdaysa Slayer'ın o anki ağı taranır.
+$ip = (Get-NetIPAddress -AddressFamily IPv4 | ? { $_.PrefixOrigin -eq 'Dhcp' -and $_.InterfaceAlias -notmatch 'Tailscale|vEthernet' } | Select-Object -First 1).IPAddress
+$ag = ($ip -replace '\.\d+$', '.0') + '/24'
 
 # Apple Devices usbmux'u kendiliğinden açılmıyor; dinlemiyorsa paketin içinden başlat.
 if (-not (Get-NetTCPConnection -LocalPort 27015 -State Listen -ErrorAction SilentlyContinue)) {
