@@ -4,7 +4,9 @@
 #import <dlfcn.h>
 #import <ifaddrs.h>
 #import <netinet/in.h>
+#import <signal.h>
 #import <stdbool.h>
+#import <sys/sysctl.h>
 #import <unistd.h>
 
 typedef int (*UygulamaAc)(CFStringRef identifier, Boolean suspended);
@@ -255,6 +257,60 @@ static void aygitlaraBaglan(BOOL hotspotta) {
     }
 }
 
+#pragma mark - Takılan medya servisi
+
+// 31 Eki: mediaserverd takılınca Araç görüntü katmanını kurarken onu bekliyor, iOS da
+// "failed to scene-create" ile 20 sn'de öldürüp yeniden açıyordu; respring çözmedi.
+// Bu kayıt görülünce servis öldürülür, launchd onu temiz başlatır.
+static NSString *const kCokmeDizini = @"/var/mobile/Library/Logs/CrashReporter";
+static time_t sonCokmeTaramasi;
+static time_t sonMedyaOldurme;
+static const int kCokmeTaramaAraligi = 10; // sn
+static const int kMedyaOldurmeBekleme = 300; // sn; düzelmezse döngüye girmesin
+
+static pid_t surecBul(const char *ad) {
+    int mib[3] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL};
+    size_t boyut = 0;
+    if (sysctl(mib, 3, NULL, &boyut, NULL, 0) != 0) return 0;
+    struct kinfo_proc *liste = malloc(boyut);
+    if (!liste) return 0;
+    pid_t bulunan = 0;
+    if (sysctl(mib, 3, liste, &boyut, NULL, 0) == 0) {
+        for (size_t i = 0; i < boyut / sizeof(struct kinfo_proc); i++) {
+            if ([@(liste[i].kp_proc.p_comm) isEqualToString:@(ad)]) { bulunan = liste[i].kp_proc.p_pid; break; }
+        }
+    }
+    free(liste);
+    return bulunan;
+}
+
+// Yeni bir scene-create kaydında mediaserverd'yi öldürür; öldürdüyse YES döner.
+static BOOL medyaServisiniDenetle(void) {
+    time_t simdi = time(NULL);
+    if (simdi - sonCokmeTaramasi < kCokmeTaramaAraligi) return NO;
+    time_t oncekiTarama = sonCokmeTaramasi;
+    sonCokmeTaramasi = simdi;
+    if (simdi - sonMedyaOldurme < kMedyaOldurmeBekleme) return NO;
+
+    BOOL takildi = NO;
+    NSFileManager *dosyalar = [NSFileManager defaultManager];
+    for (NSString *ad in [dosyalar contentsOfDirectoryAtPath:kCokmeDizini error:NULL]) {
+        if (![ad hasPrefix:@"stacks+Arac-"]) continue;
+        NSString *yol = [kCokmeDizini stringByAppendingPathComponent:ad];
+        NSDate *degisme = [dosyalar attributesOfItemAtPath:yol error:NULL].fileModificationDate;
+        if ([degisme timeIntervalSince1970] < oncekiTarama) continue;
+        NSString *icerik = [NSString stringWithContentsOfFile:yol encoding:NSUTF8StringEncoding error:NULL];
+        if ([icerik rangeOfString:@"failed to scene-create"].location != NSNotFound) { takildi = YES; break; }
+    }
+    if (!takildi) return NO;
+
+    pid_t medya = surecBul("mediaserverd");
+    int sonuc = medya ? kill(medya, SIGKILL) : -1;
+    sonMedyaOldurme = simdi;
+    NSLog(@"aracbaslat Araç scene-create ile düştü, mediaserverd (%d) öldürüldü: %d", medya, sonuc);
+    return sonuc == 0;
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
         void *kitaplik = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
@@ -288,6 +344,7 @@ int main(int argc, char *argv[]) {
             return 0;
         }
 
+        sonCokmeTaramasi = time(NULL); // açılıştan önceki eski kayıtlara bakılmaz
         BOOL onceHotspotta = NO;
         int kalanDeneme = 0;
         while (YES) {
@@ -298,6 +355,8 @@ int main(int argc, char *argv[]) {
                     // İlk deneme ve başarısızsa sonraki turlarda 10 ek deneme.
                     kalanDeneme = hotspotta ? 11 : 0;
                 }
+                // Servis yeniden kalkınca Araç'ı bir kez daha öne getir.
+                if (medyaServisiniDenetle() && hotspotta) kalanDeneme = 3;
                 if (hotspotta && kalanDeneme > 0) {
                     int sonuc = secenekliAc ? secenekliAc(CFSTR("tr.niladsp.arac"), NULL, NULL, (__bridge CFDictionaryRef)acmaSecenegi, false)
                               : uygulamaAc ? uygulamaAc(CFSTR("tr.niladsp.arac"), false) : -1;
