@@ -21,7 +21,7 @@ enc=$(iconv -f UTF-8 -t UTF-16LE "$betik" | base64 -w0)
 cikti=$(timeout 600 ssh -i ~/.ssh/slayer_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 \
     alir@100.101.69.89 powershell -NoProfile -EncodedCommand "$enc" 2>&1)
 kod=$?
-sonuc=$(printf '%s\n' "$cikti" | grep -v CLIXML | sed 's/_x000D__x000A_/ /g' | grep -E '^(KURULDU|YOK|HATA)' | tail -1)
+sonuc=$(printf '%s\n' "$cikti" | tr -d '\r' | grep -v CLIXML | sed 's/_x000D__x000A_/ /g' | grep -E '^(KURULDU|YOK|HATA)' | tail -1)
 echo "ssh=$kod sonuc=${sonuc:-bos}"
 
 gun_kaldi=$(( (7 * 86400 - yas) / 86400 ))
