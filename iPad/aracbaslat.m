@@ -8,6 +8,20 @@
 #import <unistd.h>
 
 typedef int (*UygulamaAc)(CFStringRef identifier, Boolean suspended);
+typedef int (*SecenekliAc)(CFStringRef identifier, CFURLRef url, CFDictionaryRef parametre, CFDictionaryRef secenek, Boolean suspended);
+
+#pragma mark - Uykuyu engelleme
+
+// Kilitli iPad'de işlemci uyuyunca döngü duruyor, ne iPhone'u ne hotspot'u arıyordu.
+// Bu engel yalnız sistem uykusunu tutar; ekran her zamanki gibi kararır.
+typedef uint32_t IOPMAssertionID;
+extern int IOPMAssertionCreateWithName(CFStringRef tur, uint32_t duzey, CFStringRef ad, IOPMAssertionID *kimlik);
+
+static void uykuyuEngelle(void) {
+    IOPMAssertionID kimlik = 0;
+    int sonuc = IOPMAssertionCreateWithName(CFSTR("PreventUserIdleSystemSleep"), 255, CFSTR("aracbaslat"), &kimlik);
+    NSLog(@"aracbaslat uyku engeli: %d", sonuc);
+}
 
 #pragma mark - Hotspot'a kendiliğinden bağlanma
 
@@ -36,7 +50,14 @@ static NSString *const kHotspotAdi = @"areisiphoneu";
 static WiFiManagerRef wifiYonetici;
 static WiFiDeviceClientRef wifiAygit;
 static BOOL katiliyor; // tarama ya da katılma sürerken yenisi başlamaz
+// iPad 2'de Bluetooth ile Wi-Fi aynı yongada. 31 Eki: erişim noktası açıkken Bluetooth her
+// 15 sn'de iPhone'a ve hoparlöre bağlanmaya uğraşırken katılma -3906 ve 5 ile düştü.
+// Erişim noktası görülünce Bluetooth bir süre susar, telsiz katılmaya kalır.
+static time_t btSusmaBitisi;
+static const int kBTSusma = 60; // sn
 static time_t islemBasi;
+static time_t sonrakiDeneme; // başarısız katılmadan sonra beklenir
+static const int kKatilmaBekleme = 20; // sn; erişim noktası kısa süre görünür, uzun bekleme onu kaçırıyor
 
 static BOOL hotspotAdiMi(WiFiNetworkRef ag) {
     CFStringRef ssid = ag ? WiFiNetworkGetSSID(ag) : NULL;
@@ -53,6 +74,8 @@ static BOOL hotspotAdiMi(WiFiNetworkRef ag) {
 static void katilmaBitti(WiFiDeviceClientRef aygit, WiFiNetworkRef ag, CFDictionaryRef bilgi, int hata, void *baglam) {
     NSLog(@"aracbaslat hotspot'a katılma sonucu: %d", hata);
     katiliyor = NO;
+    // Hotspot görünüp katılma -100 ile düşünce 10 sn'de bir tara-katıl döngüsü iPad'i donduruyordu.
+    if (hata != 0) sonrakiDeneme = time(NULL) + kKatilmaBekleme;
 }
 
 static void taramaBitti(WiFiDeviceClientRef aygit, CFArrayRef aglar, int hata, void *baglam) {
@@ -65,8 +88,20 @@ static void taramaBitti(WiFiDeviceClientRef aygit, CFArrayRef aglar, int hata, v
         katiliyor = NO;
         return;
     }
-    NSLog(@"aracbaslat hotspot görüldü, katılınıyor");
+    // Taramadan gelen ağda parola yok (31 Eki: katılma -3906). Aynı adlı kayıtlı ağ
+    // parolayı taşıyor; onunla katılınır.
+    CFStringRef ssid = WiFiNetworkGetSSID(bulunan);
+    CFArrayRef kayitli = WiFiManagerClientCopyNetworks(wifiYonetici);
+    BOOL kayitliMi = NO;
+    for (CFIndex i = 0; ssid && kayitli && i < CFArrayGetCount(kayitli); i++) {
+        WiFiNetworkRef ag = (WiFiNetworkRef)CFArrayGetValueAtIndex(kayitli, i);
+        CFStringRef kssid = WiFiNetworkGetSSID(ag);
+        if (kssid && CFStringCompare(kssid, ssid, 0) == kCFCompareEqualTo) { bulunan = ag; kayitliMi = YES; break; }
+    }
+    btSusmaBitisi = time(NULL) + kBTSusma;
+    NSLog(@"aracbaslat hotspot görüldü, katılınıyor (%@)", kayitliMi ? @"kayıtlı ağ" : @"tarama kaydı");
     int sonuc = WiFiDeviceClientAssociateAsync(aygit, bulunan, katilmaBitti, NULL);
+    if (kayitli) CFRelease(kayitli);
     if (sonuc != 0) {
         NSLog(@"aracbaslat katılma başlatılamadı: %d", sonuc);
         katiliyor = NO;
@@ -114,6 +149,7 @@ static void wifiHazirla(void) {
 // Wi-Fi hiçbir ağa bağlı değilse (evdeki ağa dokunmaz) erişim noktasını arar.
 static void hotspotaKatil(void) {
     if (!wifiAygit) return;
+    if (time(NULL) < sonrakiDeneme) return;
     if (katiliyor) {
         if (time(NULL) - islemBasi < 30) return;
         NSLog(@"aracbaslat tarama/katılma yanıt vermedi, yeniden deneniyor");
@@ -149,9 +185,14 @@ static BOOL hotspottaMi(void) {
     return hotspotta;
 }
 
-#pragma mark - Bluetooth hoparlöre kendiliğinden bağlanma
+#pragma mark - Bluetooth aygıtlarına kendiliğinden bağlanma
 
 // iOS 9 eşleşmiş hoparlöre kendisi bağlanmıyor (bağlantıyı hoparlör başlatmazsa).
+// iPhone'a da aynı yolla bağlanılıyor: iPhone'daki Kestirmeler "iPad bağlanınca" tetikleyicisiyle
+// erişim noktasını açıyor. Ev Wi-Fi'ı arabaya kadar yettiği için "ağdan ayrılınca" tetiklenmiyordu.
+// Hotspot'a katılınca Bluetooth susturulur: iPhone bağlantısı kesilir, menzilde olmayan aygıt
+// aranmaz. iPad 2'de Bluetooth ile Wi-Fi aynı yongada; 15 sn'de bir arama ve açık iPhone bağlantısı
+// yansıtmanın Wi-Fi'ını kesintiye uğratıyordu (30 Eki arabada donma).
 // BluetoothManager özel çerçevesi; sınıflar çalışma anında alınır, başlık yok.
 @protocol BTYonetici
 + (id)sharedInstance;
@@ -165,14 +206,15 @@ static BOOL hotspottaMi(void) {
 - (NSString *)address;
 - (BOOL)connected;
 - (void)connect;
+- (void)disconnect;
 @end
 
-// Adında bu geçen eşleşmiş aygıt aranır (büyük/küçük harf önemsiz).
-static NSString *const kHoparlorAdi = @"thinkplus";
+// Adında bunlardan biri geçen eşleşmiş aygıtlar aranır (büyük/küçük harf önemsiz).
+static NSArray<NSString *> *btAdlari(void) { return @[@"thinkplus", @"iphone"]; }
 static const int kBTDenemeAraligi = 15; // sn; menzilde değilken telsizi meşgul etmesin
 
 static id<BTYonetici> btYonetici;
-static time_t btSonDeneme;
+static NSMutableDictionary<NSString *, NSNumber *> *btSonDeneme; // ad -> son deneme zamanı
 
 static void btHazirla(void) {
     dlopen("/System/Library/PrivateFrameworks/BluetoothManager.framework/BluetoothManager", RTLD_LAZY);
@@ -184,20 +226,33 @@ static void btHazirla(void) {
     btYonetici = [(Class<BTYonetici>)sinif sharedInstance];
 }
 
-static id<BTAygit> hoparlor(void) {
-    for (id<BTAygit> aygit in [btYonetici pairedDevices]) {
-        if ([[aygit name] rangeOfString:kHoparlorAdi options:NSCaseInsensitiveSearch].location != NSNotFound) return aygit;
+static NSString *btAdi(id<BTAygit> aygit) {
+    for (NSString *ad in btAdlari()) {
+        if ([[aygit name] rangeOfString:ad options:NSCaseInsensitiveSearch].location != NSNotFound) return ad;
     }
     return nil;
 }
 
-static void hoparloreBaglan(void) {
+static void aygitlaraBaglan(BOOL hotspotta) {
     if (!btYonetici || ![btYonetici available] || ![btYonetici powered]) return;
-    if (time(NULL) - btSonDeneme < kBTDenemeAraligi) return;
-    id<BTAygit> aygit = hoparlor();
-    if (!aygit || [aygit connected]) return;
-    btSonDeneme = time(NULL);
-    [aygit connect];
+    if (!hotspotta && (katiliyor || time(NULL) < btSusmaBitisi)) return;
+    if (!btSonDeneme) btSonDeneme = [NSMutableDictionary dictionary];
+    for (id<BTAygit> aygit in [btYonetici pairedDevices]) {
+        NSString *ad = btAdi(aygit);
+        if (!ad) continue;
+        if (hotspotta) {
+            // iPhone bağlantısının tek işi erişim noktasını açtırmaktı; hoparlör bağlıysa kalır.
+            if ([ad isEqualToString:@"iphone"] && [aygit connected]) {
+                NSLog(@"aracbaslat hotspot'tayız, iPhone Bluetooth bağlantısı kesiliyor");
+                [aygit disconnect];
+            }
+            continue;
+        }
+        if ([aygit connected]) continue;
+        if (time(NULL) - [btSonDeneme[ad] longValue] < kBTDenemeAraligi) continue;
+        btSonDeneme[ad] = @(time(NULL));
+        [aygit connect];
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -205,9 +260,13 @@ int main(int argc, char *argv[]) {
         void *kitaplik = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
         UygulamaAc uygulamaAc = kitaplik ? (UygulamaAc)dlsym(kitaplik, "SBSLaunchApplicationWithIdentifier") : NULL;
         if (!uygulamaAc) NSLog(@"aracbaslat açma API'si yüklenemedi: %s", dlerror());
+        // Ekran kararmışken düz açma Araç'ı arka planda bırakıyor; kilidi açma seçeneği öne getirir.
+        SecenekliAc secenekliAc = kitaplik ? (SecenekliAc)dlsym(kitaplik, "SBSLaunchApplicationWithIdentifierAndURLAndLaunchOptions") : NULL;
+        NSDictionary *acmaSecenegi = @{@"__UnlockDevice": @YES, @"__ActivateSuspended": @NO};
 
         wifiHazirla();
         btHazirla();
+        if (argc == 1) uykuyuEngelle();
 
         // Tanı: "aracbaslat bt" eşleşmiş Bluetooth aygıtlarını yazar ve çıkar.
         if (argc > 1 && [@(argv[1]) isEqualToString:@"bt"]) {
@@ -216,7 +275,7 @@ int main(int argc, char *argv[]) {
                 CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, false);
             printf("bt hazir=%d acik=%d\n", (int)[btYonetici available], (int)[btYonetici powered]);
             for (id<BTAygit> aygit in [btYonetici pairedDevices])
-                printf("%s %s %s bagli=%d\n", [[aygit name] rangeOfString:kHoparlorAdi options:NSCaseInsensitiveSearch].location != NSNotFound ? "*" : " ",
+                printf("%s %s %s bagli=%d\n", btAdi(aygit) ? "*" : " ",
                        [[aygit name] UTF8String], [[aygit address] UTF8String], (int)[aygit connected]);
             return 0;
         }
@@ -240,7 +299,8 @@ int main(int argc, char *argv[]) {
                     kalanDeneme = hotspotta ? 11 : 0;
                 }
                 if (hotspotta && kalanDeneme > 0) {
-                    int sonuc = uygulamaAc ? uygulamaAc(CFSTR("tr.niladsp.arac"), false) : -1;
+                    int sonuc = secenekliAc ? secenekliAc(CFSTR("tr.niladsp.arac"), NULL, NULL, (__bridge CFDictionaryRef)acmaSecenegi, false)
+                              : uygulamaAc ? uygulamaAc(CFSTR("tr.niladsp.arac"), false) : -1;
                     kalanDeneme--;
                     NSLog(@"aracbaslat açma sonucu: %d, kalan deneme: %d", sonuc, kalanDeneme);
                     if (sonuc == 0) kalanDeneme = 0;
@@ -248,7 +308,7 @@ int main(int argc, char *argv[]) {
                 }
                 onceHotspotta = hotspotta;
                 if (!hotspotta) hotspotaKatil();
-                hoparloreBaglan();
+                aygitlaraBaglan(hotspotta);
             }
             // Tarama ve katılma geri çağrıları bu döngüde gelir.
             CFRunLoopRunInMode(kCFRunLoopDefaultMode, 3, false);

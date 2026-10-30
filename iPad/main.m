@@ -19,6 +19,7 @@
 #import <pthread.h>
 #import <string.h>
 #import <sys/socket.h>
+#import <sys/stat.h>
 #import <sys/time.h>
 #import <unistd.h>
 
@@ -61,6 +62,24 @@ static CMTime gercekZaman(void) {
     struct timeval t;
     gettimeofday(&t, NULL);
     return CMTimeMake((int64_t)t.tv_sec * 1000000000 + (int64_t)t.tv_usec * 1000, 1000000000);
+}
+
+// Tanı günlüğü: USB'den syslog okunamıyor, SSH ile bu dosya okunur (araclar/dene.sh).
+static void taniYaz(NSString *satir) {
+    static FILE *dosya;
+    if (!dosya) {
+        const char *yol = "/var/mobile/Library/Logs/arac-uygulama.log";
+        struct stat bilgi;
+        dosya = fopen(yol, stat(yol, &bilgi) == 0 && bilgi.st_size > 256 * 1024 ? "w" : "a");
+        if (!dosya) return;
+    }
+    time_t simdi = time(NULL);
+    struct tm tm;
+    char damga[32];
+    localtime_r(&simdi, &tm);
+    strftime(damga, sizeof(damga), "%Y-%m-%d %H:%M:%S", &tm);
+    fprintf(dosya, "%s %s\n", damga, satir.UTF8String);
+    fflush(dosya);
 }
 
 // Zaman aşımı (SO_RCVTIMEO) devreye girerse NO döner.
@@ -199,6 +218,7 @@ typedef struct {
 - (BOOL)bekliyorMu;
 - (int32_t)kareSayaciniSifirla;
 - (int32_t)sesSayaciniSifirla;
+- (int32_t)kuyrugaGireniSifirla;
 - (NSString *)sesDurumu;
 - (int)yansitmaDurumu;
 - (void)sesTamponuDoldur:(AudioQueueBufferRef)tampon;
@@ -233,6 +253,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
     volatile int32_t _kareSayaci;
     volatile int32_t _sesSayaci; // tanı: saniyedeki ses paketi
+    volatile int32_t _kuyrugaGiren; // tanı: katmana verilen kare
     volatile int _yansitma; // AirPlay 'K' paketinden: -1 bilinmiyor, 0 kapalı, 1 açık
 }
 
@@ -311,6 +332,10 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
 - (int32_t)sesSayaciniSifirla {
     return __sync_lock_test_and_set(&_sesSayaci, 0);
+}
+
+- (int32_t)kuyrugaGireniSifirla {
+    return __sync_lock_test_and_set(&_kuyrugaGiren, 0);
 }
 
 - (int)yansitmaDurumu {
@@ -545,6 +570,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
             return;
         }
         [katman enqueueSampleBuffer:(__bridge CMSampleBufferRef)tasinan];
+        __sync_add_and_fetch(&self->_kuyrugaGiren, 1);
     });
 }
 
@@ -734,6 +760,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     CGFloat _yakinlik; // 0 sığdır, 1 doldur; iki parmakla ayarlanır
     CGFloat _kistirmaBaslangici; // kıstırma başladığındaki ekran ölçeği
     int _gosterimSaniye; // olağan durumda etiket bu kadar görünür kalır
+    int _taniSaniye, _taniKare, _taniKuyruk, _taniSes; // 10 sn'lik tanı satırı
 }
 
 - (void)viewDidLoad {
@@ -989,6 +1016,20 @@ static const int kKilitSaniyesi = 10;
     BOOL airplayEtkin = [[EtkinKaynak paylasilan] etkinMi:_airplayAlici.ad];
     int yansitma = [_airplayAlici yansitmaDurumu];
 
+    _taniKare += kare;
+    _taniSes += ses;
+    _taniKuyruk += [_replayAlici kuyrugaGireniSifirla] + [_airplayAlici kuyrugaGireniSifirla];
+    if (++_taniSaniye >= 10) {
+        if (_taniKare || _taniSes || airplayBagli || replayBagli) {
+            taniYaz([NSString stringWithFormat:@"10 sn: gelen kare %d, katmana giren %d, ses paketi %d; airplay bagli=%d etkin=%d yansitma=%d; replaykit bagli=%d; katman durum=%ld hazir=%d hata=%@; ekranda=%d",
+                     _taniKare, _taniKuyruk, _taniSes, airplayBagli, airplayEtkin, yansitma, replayBagli,
+                     (long)_videoKatmani.status, _videoKatmani.isReadyForMoreMediaData,
+                     _videoKatmani.error ? _videoKatmani.error.description : @"yok",
+                     [UIApplication sharedApplication].applicationState == UIApplicationStateActive]);
+        }
+        _taniSaniye = _taniKare = _taniKuyruk = _taniSes = 0;
+    }
+
     // Durağan ekranda ReplayKit kare yollamayabilir; kesinti sayılması için ses de susmalı.
     // AirPlay'de durağan ekran (duraklatılmış video, fotoğraf) hiç kare yollamaz;
     // yansıtma açık dendikçe bu kesinti değildir.
@@ -1073,6 +1114,7 @@ static const int kKilitSaniyesi = 10;
 - (BOOL)application:(UIApplication *)application
         didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     [UIApplication sharedApplication].idleTimerDisabled = YES; // ekran kapanmasın
+    taniYaz(@"Araç açıldı");
 
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     self.window.backgroundColor = [UIColor blackColor];

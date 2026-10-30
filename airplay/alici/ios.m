@@ -208,11 +208,22 @@ static void *uygulama_isci(void *unused) {
     (void)unused;
     @autoreleasepool {
         void *handle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
+        /* Ekran kararmışken (31 Eki) düz açma Araç'ı arka planda bırakıyordu: iOS sahne
+         * kurmadı, 20 sn sonra öldürdü, döngü yansıtma boyunca sürdü. Kilidi açma
+         * seçeneği ekranı uyandırıp Araç'ı öne getirir (iPad'de parola yok). */
+        typedef int (*LaunchOptions)(CFStringRef, CFURLRef, CFDictionaryRef, CFDictionaryRef, Boolean);
         typedef int (*Launch)(CFStringRef, Boolean);
+        LaunchOptions withOptions = handle ? (LaunchOptions)dlsym(handle, "SBSLaunchApplicationWithIdentifierAndURLAndLaunchOptions") : NULL;
         Launch launch = handle ? (Launch)dlsym(handle, "SBSLaunchApplicationWithIdentifier") : NULL;
-        if (!launch) logline("Araç acma API hatasi: %s", dlerror());
-        int rc = launch ? launch(CFSTR("tr.niladsp.arac"), false) : -1;
-        logline("Araç acma sonucu: %d", rc);
+        int rc;
+        if (withOptions) {
+            NSDictionary *options = @{@"__UnlockDevice": @YES, @"__ActivateSuspended": @NO};
+            rc = withOptions(CFSTR("tr.niladsp.arac"), NULL, NULL, (__bridge CFDictionaryRef)options, false);
+        } else {
+            if (!launch) logline("Araç acma API hatasi: %s", dlerror());
+            rc = launch ? launch(CFSTR("tr.niladsp.arac"), false) : -1;
+        }
+        logline("Araç acma sonucu: %d%s", rc, withOptions ? " (kilit acarak)" : "");
         if (handle) dlclose(handle);
     }
     return NULL;

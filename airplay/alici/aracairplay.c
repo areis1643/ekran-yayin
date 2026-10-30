@@ -52,13 +52,29 @@ static struct timeval last_sent;
  * geldiği an oynatılıyordu: Bluetooth gecikmesi ve çözücüde biriken kareler sesi
  * görüntüden kaydırıyordu. */
 #define MS 1000000LL
-#define GECIKME_EN_AZ (80*MS)
+/* Hotspot arabada titrek: 80 ms tabanda her ani gecikme sesi kesip görüntüyü atlatıyordu. */
+#define GECIKME_EN_AZ (250*MS)
+#define GECIKME_PAYI (60*MS) /* takılmadan sonra en kötü gecikmenin üstüne */
 #define GECIKME_EN_COK (800*MS)
 #define CIZIM_PAYI (60*MS)   /* Araç'a iletim + donanım çözme */
 #define SES_PAYI (30*MS)
 static int64_t gecikme=GECIKME_EN_AZ, pencere_en_cok;
 static int64_t gec_v_top, gec_v_en, gec_a_top, gec_a_en;
 static uint64_t gec_v_n, gec_a_n, zamansiz_v, zamansiz_a;
+/* Kare gönderim kuyruğu: kareler oynatma zamanlarına kadar burada bekler, Araç'a o anda
+ * yollanır ve Araç onları geldiği an gösterir. Gösterim zamanını Araç'a yollayıp katmanın
+ * zaman tabanına bırakmak iOS 9'da hiç görüntü vermedi (30 Eki 23:53: 10 dk boyunca 900
+ * kare/30 sn zamanlı yollandı, ses çaldı, ekran karaydı). Ses zaten burada zamanlanıyor. */
+typedef struct kare { struct kare *sonraki; uint64_t zaman; size_t n; int key; unsigned char p[]; } kare_t;
+static kare_t *kuyruk_bas, *kuyruk_son;
+static size_t kuyruk_adet;
+static pthread_cond_t kuyruk_sinyal = PTHREAD_COND_INITIALIZER;
+static pthread_t gonderici;
+#define KUYRUK_EN_COK 90 /* 3 sn; aşılırsa bekleyenler hemen yollanır */
+static void kuyrugu_bosalt(void) { /* videolock altında */
+    while (kuyruk_bas) { kare_t *k=kuyruk_bas; kuyruk_bas=k->sonraki; free(k); }
+    kuyruk_son=NULL; kuyruk_adet=0;
+}
 static int64_t simdi_ns(void) {
     struct timespec t; clock_gettime(CLOCK_REALTIME,&t);
     return (int64_t)t.tv_sec*1000000000+t.tv_nsec;
@@ -71,13 +87,13 @@ static uint64_t oynatma_zamani(uint64_t zaman, int64_t pay, int64_t *top, int64_
     *top+=gec; (*n)++; if (*n==1 || gec>*en) *en=gec;
     int64_t gereken=gec+pay;
     if (gereken>pencere_en_cok) pencere_en_cok=gereken;
-    if (gereken>gecikme) gecikme=gereken+10*MS<GECIKME_EN_COK ? gereken+10*MS : GECIKME_EN_COK;
+    if (gereken>gecikme) gecikme=gereken+GECIKME_PAYI<GECIKME_EN_COK ? gereken+GECIKME_PAYI : GECIKME_EN_COK;
     if (gereken>gecikme) { (*zamansiz)++; return 0; }
     return zaman+(uint64_t)gecikme;
 }
 /* Ani bir takılma gecikmeyi büyütür; sonra 2 sn'de bir 10 ms yavaşça geri iner. */
 static void gecikme_azalt(void) {
-    int64_t hedef=pencere_en_cok+10*MS;
+    int64_t hedef=pencere_en_cok+GECIKME_PAYI;
     if (hedef<GECIKME_EN_AZ) hedef=GECIKME_EN_AZ;
     if (gecikme>hedef+30*MS) gecikme-=10*MS;
     pencere_en_cok=0;
@@ -223,7 +239,6 @@ static void put32(unsigned char *p, size_t n) {
     p[0]=(unsigned char)(n>>24); p[1]=(unsigned char)(n>>16);
     p[2]=(unsigned char)(n>>8); p[3]=(unsigned char)n;
 }
-static void put64(unsigned char *p, uint64_t n) { put32(p,(size_t)(n>>32)); put32(p+4,(size_t)(n&0xffffffffU)); }
 static void disconnect_client(void) {
     if (client >= 0) { shutdown(client,SHUT_RDWR); close(client); client=-1; logline("Araç koptu"); }
     waiting_idr=1;
@@ -287,7 +302,8 @@ static void video(void *c, raop_ntp_t *ntp, video_decode_struct *d) {
         } else if (type!=9) { payload+=4+len; if(type==5) key=1; }
     }
     if (key) keyframes++;
-    if (changed) { clear_gop(); waiting_idr=1; }
+    /* Yeni biçimde (iPhone döndü) eski biçimin bekleyen kareleri anlamsız. */
+    if (changed) { clear_gop(); kuyrugu_bosalt(); waiting_idr=1; }
     if (failed) { clear_gop(); disconnect_client(); skipped++; goto out; }
     if (cached_sps_len && cached_pps_len) {
         size_t vlen=9+cached_sps_len+cached_pps_len;
@@ -307,26 +323,59 @@ static void video(void *c, raop_ntp_t *ntp, video_decode_struct *d) {
         }
     }
     if (payload==1) goto out;
-    /* Bayrak bit 2: ardından 8 bayt gösterim zamanı (CLOCK_REALTIME ns). */
     uint64_t goster=oynatma_zamani(d->ntp_time_local,CIZIM_PAYI,&gec_v_top,&gec_v_en,&gec_v_n,&zamansiz_v);
-    if (goster) payload+=8;
     if (!cached_v || payload>UINT32_MAX) { clear_gop(); skipped++; goto out; }
-    unsigned char *packet=malloc(payload+5);
-    if (!packet) { clear_gop(); skipped++; goto out; }
-    packet[0]='F'; put32(packet+1,payload); packet[5]=key|(goster?4:0);
+    kare_t *k=malloc(sizeof *k+payload+5);
+    if (!k) { clear_gop(); skipped++; goto out; }
+    unsigned char *packet=k->p;
+    packet[0]='F'; put32(packet+1,payload); packet[5]=key;
     pos=0; size_t off=6;
-    if (goster) { put64(packet+off,goster); off+=8; }
     while (next_nal(d->data,n,&pos,&nal,&len)) {
         if (!len || (nal[0]&31)==7 || (nal[0]&31)==8 || (nal[0]&31)==9) continue;
         put32(packet+off,len); off+=4; memcpy(packet+off,nal,len); off+=len;
     }
-    cache_frame(packet,off,key);
-    if (client<0 || (waiting_idr && !key)) skipped++;
-    else if (send_packet(packet,off)<0) skipped++;
-    else waiting_idr=0;
-    free(packet);
+    k->sonraki=NULL; k->n=off; k->key=key;
+    /* Araç'a iletim ve çözme payı kadar önce yollanır. */
+    k->zaman=goster ? goster-(uint64_t)CIZIM_PAYI : 0;
+    if (kuyruk_son) kuyruk_son->sonraki=k; else kuyruk_bas=k;
+    kuyruk_son=k; kuyruk_adet++;
+    pthread_cond_signal(&kuyruk_sinyal);
 out:
     pthread_mutex_unlock(&videolock);
+}
+/* videolock altında. Önbellek yollanan karelerden kurulur: Araç bağlanınca GOP yeniden
+ * oynatılır, ardından kuyrukta kalanlar gelir; aynı kare iki kez çözücüye girmez. */
+static void kare_yolla(kare_t *k) {
+    cache_frame(k->p,k->n,k->key);
+    if (client<0 || (waiting_idr && !k->key)) skipped++;
+    else if (send_packet(k->p,k->n)<0) skipped++;
+    else waiting_idr=0;
+    free(k);
+}
+static void *gonderim_dongusu(void *unused) {
+    (void)unused;
+    pthread_mutex_lock(&videolock);
+    while (!stopping) {
+        if (!kuyruk_bas) {
+            struct timespec t; clock_gettime(CLOCK_REALTIME,&t); t.tv_sec++;
+            pthread_cond_timedwait(&kuyruk_sinyal,&videolock,&t);
+            continue;
+        }
+        kare_t *k=kuyruk_bas;
+        int64_t simdi=simdi_ns();
+        /* Saat tutarsızsa (1 sn'den uzak gelecek) ya da kuyruk şiştiyse beklemeden yolla. */
+        if (k->zaman && (int64_t)k->zaman>simdi && (int64_t)k->zaman-simdi<1000*MS && kuyruk_adet<=KUYRUK_EN_COK) {
+            struct timespec t={(time_t)(k->zaman/1000000000ULL),(long)(k->zaman%1000000000ULL)};
+            pthread_cond_timedwait(&kuyruk_sinyal,&videolock,&t);
+            continue;
+        }
+        kuyruk_bas=k->sonraki; if (!kuyruk_bas) kuyruk_son=NULL;
+        kuyruk_adet--;
+        kare_yolla(k);
+    }
+    kuyrugu_bosalt();
+    pthread_mutex_unlock(&videolock);
+    return NULL;
 }
 static void *accept_loop(void *unused) {
     (void)unused;
@@ -392,6 +441,7 @@ static int start_local(void) {
     addr.sin_family=AF_INET; addr.sin_port=htons(7101); addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
     if(bind(listener,(struct sockaddr *)&addr,sizeof addr) || listen(listener,4) || listener>=FD_SETSIZE) goto fail;
     if(pthread_create(&accept_thread,NULL,accept_loop,NULL)) goto fail;
+    if(pthread_create(&gonderici,NULL,gonderim_dongusu,NULL)) { stopping=1; pthread_join(accept_thread,NULL); stopping=0; goto fail; }
     return 0;
 fail:
     close(listener); listener=-1; return -1;
@@ -622,7 +672,7 @@ int main(int argc,char **argv) {
         if (now-azaltma>=2) { pthread_mutex_lock(&videolock); gecikme_azalt(); pthread_mutex_unlock(&videolock); azaltma=now; }
         if(now-summary>=30) {
             pthread_mutex_lock(&videolock);
-            logline("son 30 sn: %"PRIu64" kare, %"PRIu64" anahtar, %"PRIu64" atlanan, önbellek %zu kare/%zu bayt",frames,keyframes,skipped,cached_gop_frames,cached_gop_len);
+            logline("son 30 sn: %"PRIu64" kare, %"PRIu64" anahtar, %"PRIu64" atlanan, önbellek %zu kare/%zu bayt, kuyruk %zu kare, Araç %s",frames,keyframes,skipped,cached_gop_frames,cached_gop_len,kuyruk_adet,client>=0?"bağlı":"yok");
             logline("son 30 sn ses: paket=%"PRIu64" cozulen=%"PRIu64" hata=%"PRIu64,audio_packets,audio_decoded,audio_errors);
             uint64_t atilan,beklenen; ses_sayaclar(&atilan,&beklenen);
             if (gec_v_n || gec_a_n || zamansiz_v || zamansiz_a)
@@ -644,7 +694,10 @@ int main(int argc,char **argv) {
     }
 done:
     stopping=1;
-    if(local_started) { pthread_join(accept_thread,NULL); close(listener); }
+    if(local_started) {
+        pthread_mutex_lock(&videolock); pthread_cond_signal(&kuyruk_sinyal); pthread_mutex_unlock(&videolock);
+        pthread_join(gonderici,NULL); pthread_join(accept_thread,NULL); close(listener);
+    }
     if(airplay_registered) dnssd_unregister_airplay(dns);
     if(raop_registered) dnssd_unregister_raop(dns);
     if(raop) { raop_stop_httpd(raop);raop_destroy(raop); }
