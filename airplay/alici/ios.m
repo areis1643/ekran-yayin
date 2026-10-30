@@ -28,6 +28,9 @@ static pthread_mutex_t kilit = PTHREAD_MUTEX_INITIALIZER;
 static AudioUnit birim;
 static dispatch_queue_t sesKuyruk;
 static id kesinti, rotaDegisti;
+/* Çağırma sayacı: RemoteIO çalıştıkça artar; kesintide bilerek durdurulduysa kesik=1. */
+static volatile uint32_t cagri;
+static volatile int kesik;
 
 static int64_t gercekZaman(void) {
     struct timespec t;
@@ -82,6 +85,7 @@ void ses_sayaclar(uint64_t *a, uint64_t *b) {
 static OSStatus doldur(void *ctx, AudioUnitRenderActionFlags *flags,
                       const AudioTimeStamp *time, UInt32 bus, UInt32 frames, AudioBufferList *io) {
     (void)ctx; (void)bus;
+    cagri++;
     for (UInt32 b = 0; b < io->mNumberBuffers; b++)
         if (io->mBuffers[b].mData) memset(io->mBuffers[b].mData, 0, io->mBuffers[b].mDataByteSize);
     if (!io->mNumberBuffers || !io->mBuffers[0].mData) return noErr;
@@ -149,6 +153,28 @@ static int etkinlestir(void) {
     }
     return 0;
 }
+/* sesKuyruk üstünde çağrılır. */
+static int birimiKur(void) {
+    int rc;
+    if ((rc = etkinlestir())) return rc;
+    AudioComponentDescription desc = {kAudioUnitType_Output, kAudioUnitSubType_RemoteIO, kAudioUnitManufacturer_Apple, 0, 0};
+    AudioComponent component = AudioComponentFindNext(NULL, &desc);
+    if (!component) { logline("ses RemoteIO bulunamadi"); return -1; }
+    if ((rc = durum("instance", AudioComponentInstanceNew(component, &birim)))) return rc;
+    UInt32 enable = 1;
+    AudioStreamBasicDescription fmt = {44100, kAudioFormatLinearPCM,
+        kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked, 4, 1, 4, 2, 16, 0};
+    AURenderCallbackStruct cb = {doldur, NULL};
+    if ((rc = durum("enable", AudioUnitSetProperty(birim, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enable, sizeof enable))) ||
+        (rc = durum("format", AudioUnitSetProperty(birim, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &fmt, sizeof fmt))) ||
+        (rc = durum("callback", AudioUnitSetProperty(birim, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb))) ||
+        (rc = durum("initialize", AudioUnitInitialize(birim))) ||
+        (rc = durum("start", AudioOutputUnitStart(birim)))) {
+        AudioComponentInstanceDispose(birim); birim = NULL; return rc;
+    }
+    gecikmeyiOku();
+    return 0;
+}
 int ses_baslat(void) {
     @autoreleasepool {
         mach_timebase_info(&saatOrani);
@@ -156,32 +182,18 @@ int ses_baslat(void) {
         __block int rc = 0;
         dispatch_sync(sesKuyruk, ^{
             @autoreleasepool {
-                if ((rc = etkinlestir())) return;
-                AudioComponentDescription desc = {kAudioUnitType_Output, kAudioUnitSubType_RemoteIO, kAudioUnitManufacturer_Apple, 0, 0};
-                AudioComponent component = AudioComponentFindNext(NULL, &desc);
-                if (!component) { logline("ses RemoteIO bulunamadi"); rc = -1; return; }
-                if ((rc = durum("instance", AudioComponentInstanceNew(component, &birim)))) return;
-                UInt32 enable = 1;
-                AudioStreamBasicDescription fmt = {44100, kAudioFormatLinearPCM,
-                    kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked, 4, 1, 4, 2, 16, 0};
-                AURenderCallbackStruct cb = {doldur, NULL};
-                if ((rc = durum("enable", AudioUnitSetProperty(birim, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enable, sizeof enable))) ||
-                    (rc = durum("format", AudioUnitSetProperty(birim, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &fmt, sizeof fmt))) ||
-                    (rc = durum("callback", AudioUnitSetProperty(birim, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb))) ||
-                    (rc = durum("initialize", AudioUnitInitialize(birim))) ||
-                    (rc = durum("start", AudioOutputUnitStart(birim)))) {
-                    AudioComponentInstanceDispose(birim); birim = NULL; return;
-                }
-                gecikmeyiOku();
+                if ((rc = birimiKur())) return;
                 kesinti = [[NSNotificationCenter defaultCenter] addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
                     NSUInteger type = [note.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
                     dispatch_async(sesKuyruk, ^{
                         @autoreleasepool {
                             if (!birim) return;
                             durum("interruption stop", AudioOutputUnitStop(birim));
+                            kesik = 1;
                             ses_temizle();
-                            if (type == AVAudioSessionInterruptionTypeEnded && !etkinlestir())
-                                durum("interruption restart", AudioOutputUnitStart(birim));
+                            if (type == AVAudioSessionInterruptionTypeEnded && !etkinlestir() &&
+                                !durum("interruption restart", AudioOutputUnitStart(birim)))
+                                kesik = 0;
                         }
                     });
                 }];
@@ -193,6 +205,29 @@ int ses_baslat(void) {
         });
         return rc;
     }
+}
+/* 31 Eki: mediaserverd öldürülünce RemoteIO sessizce ölüyor, geri çağırma hiç gelmiyor.
+ * Daemon'un ana iş parçacığı select'te, çalışma döngüsü yok; AVAudioSession sıfırlama
+ * bildirimi de gelmedi (denendi). Ana döngü 2 sn'de bir çağırır: sayaç durmuşsa birim
+ * baştan kurulur. */
+void ses_denetle(void) {
+    /* AVAudioSession sıfırlamayı ana iş parçacığının çalışma döngüsünde işliyor olabilir. */
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
+    static uint32_t onceki;
+    static time_t sonKurulum;
+    uint32_t simdi = cagri;
+    int durdu = simdi == onceki;
+    onceki = simdi;
+    if (!sesKuyruk || !durdu || kesik || time(NULL) - sonKurulum < 10) return;
+    sonKurulum = time(NULL);
+    dispatch_async(sesKuyruk, ^{
+        @autoreleasepool {
+            logline("ses cikisi durmus, yeniden kuruluyor");
+            if (birim) { AudioOutputUnitStop(birim); AudioComponentInstanceDispose(birim); birim = NULL; }
+            ses_temizle();
+            birimiKur();
+        }
+    });
 }
 void ses_kapat(void) {
     @autoreleasepool {

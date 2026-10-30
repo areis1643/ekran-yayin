@@ -222,6 +222,7 @@ typedef struct {
 - (NSString *)sesDurumu;
 - (int)yansitmaDurumu;
 - (void)sesTamponuDoldur:(AudioQueueBufferRef)tampon;
+- (void)medyaServisiSifirlandi;
 @end
 
 // AudioQueue geri çağırması; halka tampondan okur, boşsa sessizlik yazar.
@@ -255,6 +256,7 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     volatile int32_t _sesSayaci; // tanı: saniyedeki ses paketi
     volatile int32_t _kuyrugaGiren; // tanı: katmana verilen kare
     volatile int _yansitma; // AirPlay 'K' paketinden: -1 bilinmiyor, 0 kapalı, 1 açık
+    volatile int32_t _sesYenidenKur; // mediaserverd yeniden başladı, eski kuyruk ölü
 }
 
 - (instancetype)initWithKatman:(AVSampleBufferDisplayLayer *)katman
@@ -589,10 +591,17 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
     pcmBoyu -= pcmBoyu % cerceveBoyu; // yarım çerçeveyi at
     if (pcmBoyu == 0) return;
 
-    if (!_sesKuyrugu || _sesHizi != (double)hiz || _sesKanali != kanal) {
+    BOOL yenidenKur = __sync_lock_test_and_set(&_sesYenidenKur, 0) != 0;
+    if (yenidenKur || !_sesKuyrugu || _sesHizi != (double)hiz || _sesKanali != kanal) {
         [self sesKuyrugunuKur:hiz kanal:kanal];
     }
     [self pcmYaz:p + 5 uzunluk:pcmBoyu];
+}
+
+// 31 Eki: mediaserverd öldürülünce görüntü toparladı ama AudioQueue sessiz kaldı.
+// Kuyruk ağ iş parçacığında kurulduğu için yalnız işaret konur, sonraki paket kurar.
+- (void)medyaServisiSifirlandi {
+    __sync_lock_test_and_set(&_sesYenidenKur, 1);
 }
 
 - (void)sesKuyrugunuKur:(uint32_t)hiz kanal:(int)kanal {
@@ -836,10 +845,11 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
 
 
     // Ses oturumu: yalnızca çalma, uygulama öndeyken etkin.
-    NSError *hata = nil;
-    AVAudioSession *oturum = [AVAudioSession sharedInstance];
-    [oturum setCategory:AVAudioSessionCategoryPlayback error:&hata];
-    [oturum setActive:YES error:&hata];
+    [self sesOturumunuAc];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(medyaServisiSifirlandi:)
+                                                 name:AVAudioSessionMediaServicesWereResetNotification
+                                               object:nil];
 
     _replayAlici = [[Alici alloc] initWithKatman:_videoKatmani
                                             host:"172.20.10.1"
@@ -857,6 +867,21 @@ static void SesGeriCagirma(void *kullanici, AudioQueueRef kuyruk, AudioQueueBuff
                                                        selector:@selector(durumuGuncelle)
                                                        userInfo:nil
                                                         repeats:YES];
+}
+
+- (void)sesOturumunuAc {
+    NSError *hata = nil;
+    AVAudioSession *oturum = [AVAudioSession sharedInstance];
+    [oturum setCategory:AVAudioSessionCategoryPlayback error:&hata];
+    [oturum setActive:YES error:&hata];
+}
+
+// mediaserverd yeniden başlayınca ses oturumu ve AudioQueue'lar geçersiz olur.
+- (void)medyaServisiSifirlandi:(NSNotification *)bildirim {
+    taniYaz(@"medya servisi yeniden başladı, ses yeniden kuruluyor");
+    [self sesOturumunuAc];
+    [_replayAlici medyaServisiSifirlandi];
+    [_airplayAlici medyaServisiSifirlandi];
 }
 
 - (void)viewDidLayoutSubviews {
@@ -1096,6 +1121,7 @@ static const int kKilitSaniyesi = 10;
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_durumZamanlayici invalidate];
     [_replayAlici durdur];
     [_airplayAlici durdur];

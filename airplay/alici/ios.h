@@ -16,6 +16,7 @@ void ses_sayaclar(uint64_t *atilan, uint64_t *beklenen);
 /* Etkin ses çıkışının adı ve gecikmesi günlüğe yazılır. */
 void ses_rota_yaz(void);
 void ses_duzey(float db);
+void ses_denetle(void);
 void ses_kapat(void);
 /* Returns dispatch status; the asynchronous SBS result is logged by the worker. */
 int uygulama_ac(void);

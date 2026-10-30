@@ -669,7 +669,7 @@ int main(int argc,char **argv) {
             pthread_mutex_lock(&videolock); int bagli=client>=0; pthread_mutex_unlock(&videolock);
             if (!bagli) { son_acma=now; uygulama_ac(); }
         }
-        if (now-azaltma>=2) { pthread_mutex_lock(&videolock); gecikme_azalt(); pthread_mutex_unlock(&videolock); azaltma=now; }
+        if (now-azaltma>=2) { pthread_mutex_lock(&videolock); gecikme_azalt(); pthread_mutex_unlock(&videolock); azaltma=now; ses_denetle(); }
         if(now-summary>=30) {
             pthread_mutex_lock(&videolock);
             logline("son 30 sn: %"PRIu64" kare, %"PRIu64" anahtar, %"PRIu64" atlanan, önbellek %zu kare/%zu bayt, kuyruk %zu kare, Araç %s",frames,keyframes,skipped,cached_gop_frames,cached_gop_len,kuyruk_adet,client>=0?"bağlı":"yok");
