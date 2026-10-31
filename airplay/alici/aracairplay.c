@@ -143,7 +143,14 @@ void logline(const char *fmt, ...) {
     fflush(stdout); if (logfile) fflush(logfile);
     pthread_mutex_unlock(&loglock);
 }
-static void library_log(void *c, int level, const char *msg) { (void)c; if (debug_logs || level <= LOGGER_WARNING) logline("UxPlay[%d] %s", level, msg); }
+/* 31 Eki: iPhone "Araç Ekran"ı seçti, bağlanamadı, günlükte iz yoktu (bağlantı satırları
+ * INFO'daydı). Bağlantı kabul/kapanış ve uç adresleri her zaman yazılsın. */
+static int baglanti_satiri(const char *m) {
+    static const char *const s[]={"Accepted ","Connection closed","Removing connection","Local :","Remote:","Max connections","Initialized server","Client authentication","ipv6 zone_id"};
+    for (size_t i=0;i<sizeof s/sizeof *s;i++) if (strstr(m,s[i])) return 1;
+    return 0;
+}
+static void library_log(void *c, int level, const char *msg) { (void)c; if (debug_logs || level <= LOGGER_WARNING || (level==LOGGER_INFO && baglanti_satiri(msg))) logline("UxPlay[%d] %s", level, msg); }
 static void caught(int sig) { (void)sig; stopping = 1; }
 /* Cihazda ReportCrash bu daemon için rapor yazmıyor; çöküşü günlüğe kendimiz düşeriz. */
 static void crashed(int sig) {
@@ -592,6 +599,9 @@ static void format(void *c,unsigned char *ct,unsigned short *spf,bool *screen,bo
 }
 static void running(void *c,bool b) {
     (void)c; mirroring=b; logline("mirror %s",b?"başladı":"bitti");
+    /* Bitmiş oturumun GOP'u Araç'a canlıymış gibi yollanmasın (31 Eki: sabah gece 02:45'in
+     * donuk karesi gösterildi). */
+    if (!b) { pthread_mutex_lock(&videolock); clear_gop(); pthread_mutex_unlock(&videolock); }
     if (b) { son_acma=time(NULL); logline("Araç acma is parcacigi: %d",uygulama_ac()); }
 }
 static void admit(void *c,char *id,char *model,char *name,bool *ok) { (void)c;*ok=true;logline("iPhone bağlandı id=%s model=%s name=%s",id?id:"",model?model:"",name?name:""); }
