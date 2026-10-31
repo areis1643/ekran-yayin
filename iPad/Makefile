@@ -20,6 +20,12 @@ aracbaslat_LDFLAGS = -L$(CURDIR)/sdkstub
 aracbaslat_INSTALL_PATH = /usr/libexec
 aracbaslat_CODESIGN_FLAGS = -Saracbaslat.entitlements
 
+# Erişim noktasında IPv6'yı kapatan root yardımcısı (aracbaslat mobile kullanıcısında).
+TOOL_NAME += aracv6
+aracv6_FILES = aracv6.c
+aracv6_LDFLAGS = -L$(CURDIR)/sdkstub
+aracv6_INSTALL_PATH = /usr/libexec
+
 include $(THEOS_MAKE_PATH)/application.mk
 include $(THEOS_MAKE_PATH)/tool.mk
 

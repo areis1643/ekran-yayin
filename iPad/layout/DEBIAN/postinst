@@ -11,4 +11,8 @@ chown root:wheel /Library/LaunchDaemons/tr.niladsp.aracairplay.plist
 chmod 644 /Library/LaunchDaemons/tr.niladsp.aracairplay.plist
 launchctl unload /Library/LaunchDaemons/tr.niladsp.aracairplay.plist 2>/dev/null
 launchctl load /Library/LaunchDaemons/tr.niladsp.aracairplay.plist
+chown root:wheel /Library/LaunchDaemons/tr.niladsp.aracv6.plist
+chmod 644 /Library/LaunchDaemons/tr.niladsp.aracv6.plist
+launchctl unload /Library/LaunchDaemons/tr.niladsp.aracv6.plist 2>/dev/null
+launchctl load /Library/LaunchDaemons/tr.niladsp.aracv6.plist
 exit 0
