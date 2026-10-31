@@ -151,3 +151,19 @@ Sıradaki: 5. adım — `video_process` Annex-B kareleri Araç'ın AVSampleBuffe
   sürerken Araç bağlı değilse daemon 5 sn'de bir yeniden açmayı dener.
 - 28 Ekim 12:35 kuruldu; daemon ayağa kalktı (iPad hoparlörü, çıkış gecikmesi 25 ms). Yansıtma
   ile deneme hotspot'ta bekliyor.
+
+## 9. adım (31 Ekim 2026) — iPhone "Araç Ekran"ı seçiyor, bağlantı daemon'a hiç gelmiyor
+
+- Belirti: arabada ve evde, iPhone listede Araç Ekran'ı görüyor, seçince bağlanmıyor. Daemon
+  günlüğünde iz yoktu; UxPlay'in bağlantı satırları INFO'daydı (b0b55f4 ile yazılıyor).
+- `araclar/kokla/` (iPad'de BPF ile paket özeti, tcpdump yok) gösterdi: iPhone yalnız IPv6
+  link-local (fe80::…:7100) ile SYN yolluyor, iPad cevap vermiyor. iPhone'dan gelen IPv6 TCP
+  paketlerinin sağlama toplamı bozuk (ör. ffe1, 0xffff olmalı), IPv4 paketleri temiz. iPad
+  çekirdeği bozuk paketi sessizce atıyor; iPad'den iPhone'a IPv6 bağlantısında da aynısı.
+  Daemon IPv6'da dinliyor (yerelden [fe80::…%en0]:7100 bağlandı), pf kapalı.
+- iPad'de `ipconfig set en0 NONE-V6` tek başına yetmedi: iPhone A kaydını aldı ama IPv4'le
+  denemedi (iPhone o sırada takılı durumdaydı; geri alındı: AUTOMATIC-V6).
+- iPhone yeniden başlatılınca yansıtma IPv4'le (172.20.10.1 -> .13) hemen başladı. IPv6
+  toplamları yeniden başlatmadan sonra da bozuk; yani düzelen IPv6 değil, iPhone'un IPv4'ü
+  seçmesi. Tekrarlarsa ilk çare iPhone'u yeniden başlatmak; kalıcı çözüm için açık: iPad
+  erişim noktasındayken IPv6'yı kapatmak (root gerekir, aracbaslat mobile kullanıcısında).
